@@ -4,9 +4,10 @@
 
 界面为现代化扁平化设计，原生 HTML/CSS/JS，无构建步骤；所有数据存于 D1，敏感字段使用 `JWT_SECRET` 派生的密钥进行 AES-256-GCM 加密。
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/YOUR_GITHUB_USERNAME/message-dispatch-platform)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/JiaHui-Nie/MessageDispatchPlatform)
+[![CI](https://github.com/JiaHui-Nie/MessageDispatchPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/JiaHui-Nie/MessageDispatchPlatform/actions/workflows/ci.yml)
 
-> 把上面按钮链接中的 `YOUR_GITHUB_USERNAME` 替换成你的 GitHub 用户名后，即可在 README 中直接一键部署。
+> 点击按钮即可用本仓库一键部署；如果你 Fork 了本项目，请把按钮链接中的仓库地址替换为你 Fork 后的地址。
 
 ---
 
@@ -56,10 +57,9 @@
 
 ## 一键部署（推荐）
 
-1. 登录 GitHub，把本仓库 fork 或推送到你的账号下。
-2. 修改 README 顶部按钮链接里的 `YOUR_GITHUB_USERNAME`，然后点击 **Deploy to Cloudflare**。
-3. Cloudflare 会引导你创建 Worker 并自动创建/绑定名为 `message-dispatch-platform` 的 D1 数据库。
-4. 部署完成后，在 **Worker → Settings → Variables and Secrets** 中添加一个 **Secret**：
+1. 点击顶部 **Deploy to Cloudflare** 按钮（如果使用 Fork，请确认按钮指向你自己的仓库）。
+2. Cloudflare 会请求 GitHub 授权，选择仓库后创建 Worker，并自动创建/绑定名为 `message-dispatch-platform` 的 D1 数据库。
+3. 部署完成后，在 **Worker → Settings → Variables and Secrets** 中添加一个 **Secret**：
 
    | 名称 | 值 |
    | --- | --- |
@@ -69,7 +69,8 @@
    node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
    ```
 
-5. 打开 `https://<你的-worker>.workers.dev`，首次访问会要求为 `admin` 设置密码，完成后即可使用。
+4. 打开 `https://<你的-worker>.workers.dev`，首次访问会要求为 `admin` 设置密码，完成后即可使用。
+5. （可选）在 **Worker → Settings → Domains & Routes** 绑定自定义域名。
 
 > 如果忘记设置 `JWT_SECRET`，页面会显示明确的配置提示，而不会以不安全的方式启动。
 >
@@ -80,6 +81,10 @@
 前置条件：Node.js ≥ 24、pnpm、一个 Cloudflare 账号。
 
 ```bash
+# 0. 克隆仓库
+git clone git@github.com:JiaHui-Nie/MessageDispatchPlatform.git
+cd MessageDispatchPlatform
+
 # 1. 安装依赖
 pnpm install
 
