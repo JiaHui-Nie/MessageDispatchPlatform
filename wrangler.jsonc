@@ -1,6 +1,9 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "message-dispatch-platform",
+  // Cloudflare 通过 GitHub 连接创建的项目会使用仓库名的小写形式作为 Worker 名称
+  //（MessageDispatchPlatform → messagedispatchplatform）。
+  // 两者不一致时 Workers Builds 会提示名称不匹配并覆盖本次构建，因此这里保持同名。
+  "name": "messagedispatchplatform",
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
   "workers_dev": true,
