@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="信息分发平台">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366f1" />
+      <stop offset="1" stop-color="#4338ca" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#g)" />
+  <path d="M17 23.5A4.5 4.5 0 0 1 21.5 19h21a4.5 4.5 0 0 1 4.5 4.5v13a4.5 4.5 0 0 1-4.5 4.5H30l-8.2 6.4a1.2 1.2 0 0 1-1.9-1V41h-1.4A4.5 4.5 0 0 1 17 36.5v-13Z" fill="#fff" opacity=".95" />
+  <path d="M25 28h15M25 34h9" stroke="#4338ca" stroke-width="3" stroke-linecap="round" />
+</svg>

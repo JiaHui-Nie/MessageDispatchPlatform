@@ -1,0 +1,5 @@
+# pnpm 配置（pnpm 10+ 从这里读取设置）。
+# esbuild 与 workerd 需要在安装时执行构建脚本，wrangler 才能正常打包与本地运行。
+allowBuilds:
+  esbuild: true
+  workerd: true

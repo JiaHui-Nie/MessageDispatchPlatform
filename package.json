@@ -1,0 +1,35 @@
+{
+  "name": "message-dispatch-platform",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "基于 Cloudflare Workers + D1 的信息分发与反馈回复平台",
+  "keywords": [
+    "cloudflare-workers",
+    "d1",
+    "message-dispatch",
+    "feedback"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --test-isolation=none tests/app.test.ts",
+    "check": "pnpm run typecheck && pnpm run test",
+    "db:create": "wrangler d1 create message-dispatch-platform",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "gen:schema": "node scripts/gen-schema.mjs",
+    "cf-typegen": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261112.1",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.160.1"
+  },
+  "packageManager": "pnpm@11.28.5"
+}

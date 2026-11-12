@@ -1,0 +1,40 @@
+简介：一个面向cloudflare的信息分发/反馈提交回复平台，源代码将使用git推送到GitHub。
+
+一、需要有安全性，应使用JWT_SECRET，并在readme里写上deploy to cloudflare按钮，要求第一次部署时设置JWT_TOKEN，信息都会存储在D1存储库里，后续使用这个JWT_SECRET对D1数据库存储的信息进行加密。
+
+二、有关操作
+注册：这个平台可以通过worker打开web管理界面，第一次登陆时需要设置admin管理密码。admin也具有普通用户的所有功能。此外，admin可以在后台生成注册码，后续用户打开worker的网页可以通过用户名，密码，注册码（必须）进行注册。
+
+平台内可以生成api key，所有接口使用POST协议。
+①/setinformation？/{username}? 用途：固定信息分发功能
+需要：“user_name”、“api_key”、“key”、“value” 返回：“status”（正常为200）
+用户也可以直接在网站后台“发布信息“图形化操作（此时无需api key）。
+
+②/getinformation? 用途：获取固定信息“key”对应的“value”(无需api key)。
+需要：“user_name”、 “key” 返回：“value”
+
+③/sendfeedback?用途：任何人提交反馈（对应user_name用户需手动开启收取信息的功能），会在后台反馈界面显示当前反馈（已读/未读），可以查看/回复。提交反馈的人收到session_id，可以在其他api使用
+需要：“user_name”、“feedback” 返回“session_id”
+
+④/getfeedbackbysessionid?用途：获取反馈信息
+需要：“session_id” 返回：对话信息（举例：大概内容是{"title":"","chat":{"time":"2026-11-11 08:05", "type": "feedback", "information": "xxxxx"},{"time": "2026-12-08 13:25", "type": "reply", "information": "xxxxxx"}}，其中feedback和reply可以有很多个）
+
+⑤/sendfeefbackbysessionid?用途：追加回复
+需要：“session_id”“feedback”“api_key”（可选，若使用则标记为reply）返回：“status”（正常为200）
+
+⑤/getfeedbacklist?用途：获取用户当前收到的反馈清单
+需要：“user_name”、“api_key” 返回：反馈清单（举例：[{"session_id":"xxxxxxxxx……","title":"","update_time":"2026-12-08 13:25"}]清单内的反馈可以有多个）
+
+⑥/deleteinformation?用途：删除固定信息
+需要：“user_name”、“api_key”、“key”返回：“status”（正常为200）
+
+⑦/deletefeedback?用途：删除反馈
+需要：“user_name”、“api_key”、“key”返回：“status”（正常为200）
+
+三、界面：现代化设计，扁平化简约网页
+登录界面：第一次登陆时直接显示账号为admin，要求用户设置密码；后续显示正常登陆界面，用户名、密码、登录按钮、注册入口、（无需找回密码）
+注册界面：用户名，密码，注册码
+个人主页：侧栏显示：总览（默认）、安全、发布信息、获取反馈 【右侧内容暂未想好，选取合适的即可】
+安全：修改密码、添加（要求用户输入名称，生成一个api_key）、删除api_key、（有一个列表展示api_key的名称和api_key，api_key默认隐藏，可以点击眼睛图标查看）
+发布信息：可以手动发布信息，设置“key”和“value”，也可以删除信息
+获取反馈：有一个开关，表示是否开关反馈。下面显示一个列表，展示当前收到的反馈清单。

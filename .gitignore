@@ -1,0 +1,27 @@
+# dependencies
+node_modules/
+.pnpm-store/
+.pnpm-cache/
+
+# local secrets
+.dev.vars
+.env
+.env.*
+
+# wrangler / cloudflare
+.wrangler/
+worker-configuration.d.ts
+
+# build & logs
+dist/
+coverage/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
