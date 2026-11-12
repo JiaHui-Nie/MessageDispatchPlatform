@@ -235,13 +235,19 @@ export async function markFeedbackRead(db: D1Database, userId: number, sessionId
 }
 
 export async function deleteFeedbackSession(db: D1Database, userId: number, sessionId: string): Promise<void> {
-  const changes = await runStatement(db, 'DELETE FROM feedback_sessions WHERE session_id = ? AND user_id = ?', [
-    sessionId,
-    userId,
-  ]);
-  if (changes === 0) {
+  const owned = await firstRow<{ session_id: string }>(
+    db,
+    'SELECT session_id FROM feedback_sessions WHERE session_id = ? AND user_id = ?',
+    [sessionId, userId],
+  );
+  if (!owned) {
     throw notFound('feedback_not_found', '反馈不存在');
   }
+  // 显式删除消息，不依赖外键级联是否开启。
+  await db.batch([
+    db.prepare('DELETE FROM feedback_messages WHERE session_id = ?').bind(sessionId),
+    db.prepare('DELETE FROM feedback_sessions WHERE session_id = ? AND user_id = ?').bind(sessionId, userId),
+  ]);
 }
 
 export async function updateFeedbackSettings(

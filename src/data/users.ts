@@ -1,4 +1,4 @@
-import { firstRow, runStatement } from '../db/d1.ts';
+import { allRows, firstRow, runStatement } from '../db/d1.ts';
 import { hashPassword, verifyPassword, getDummyPasswordHash } from '../lib/crypto.ts';
 import { badRequest, conflict, unauthorized } from '../lib/errors.ts';
 import { formatTime, nowIso } from '../lib/time.ts';
@@ -100,8 +100,20 @@ export async function touchLastLogin(db: D1Database, userId: number): Promise<vo
 }
 
 export async function deleteUser(db: D1Database, userId: number): Promise<boolean> {
-  const changes = await runStatement(db, 'DELETE FROM users WHERE id = ?', [userId]);
-  return changes > 0;
+  // 显式级联删除，不依赖 D1 的 foreign_keys 设置是否开启。
+  const sessions = await allRows<{ session_id: string }>(db, 'SELECT session_id FROM feedback_sessions WHERE user_id = ?', [
+    userId,
+  ]);
+  const statements = [
+    ...sessions.map((session) => db.prepare('DELETE FROM feedback_messages WHERE session_id = ?').bind(session.session_id)),
+    db.prepare('DELETE FROM feedback_sessions WHERE user_id = ?').bind(userId),
+    db.prepare('DELETE FROM information WHERE user_id = ?').bind(userId),
+    db.prepare('DELETE FROM api_keys WHERE user_id = ?').bind(userId),
+    db.prepare('DELETE FROM users WHERE id = ?').bind(userId),
+  ];
+  const results = await db.batch(statements);
+  const lastResult = results[results.length - 1];
+  return Number(lastResult?.meta?.changes ?? 0) > 0;
 }
 
 export async function listUsersWithStats(db: D1Database, timeZone: string): Promise<UserWithStats[]> {

@@ -1,4 +1,4 @@
-import { DecryptionError, ApiError, badRequest, tooManyRequests } from './errors.ts';
+import { DecryptionError, ApiError, badRequest } from './errors.ts';
 
 export type Params = Record<string, string>;
 export type HttpMethod = 'GET' | 'POST';
@@ -200,5 +200,3 @@ export function assertSameOrigin(request: Request): void {
   }
   throw new ApiError(403, 'cross_origin_denied', '跨站请求被拒绝');
 }
-
-export { tooManyRequests };

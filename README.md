@@ -73,7 +73,7 @@
 
 > 如果忘记设置 `JWT_SECRET`，页面会显示明确的配置提示，而不会以不安全的方式启动。
 >
-> 首次请求会自动建表；也可以手动执行 `wrangler d1 migrations apply DB --remote`（见下一节）。
+> 首次请求会自动建表；也可以手动执行 `pnpm db:migrate:remote`（见下一节）。
 
 ## 手动部署（CLI）
 
@@ -84,14 +84,14 @@
 pnpm install
 
 # 2. 登录 Cloudflare
-pnpm wrangler login
+pnpm exec wrangler login
 
 # 3.（可选）创建 D1 并填写 database_id
 pnpm db:create
 #   把输出的 database_id 填进 wrangler.jsonc；不填则 deploy 时自动创建
 
 # 4. 设置生产密钥（不要把密钥写进仓库）
-pnpm wrangler secret put JWT_SECRET
+pnpm exec wrangler secret put JWT_SECRET
 
 # 5. 部署
 pnpm deploy
@@ -441,7 +441,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 
 ## 环境变量
 
-在 `wrangler.jsonc` 的 `vars` 中配置普通变量，通过 `wrangler secret put` 配置密钥：
+在 `wrangler.jsonc` 的 `vars` 中配置普通变量，通过 `wrangler secret put`（或 `pnpm exec wrangler secret put`）配置密钥：
 
 | 名称 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -487,12 +487,12 @@ pnpm typecheck
 pnpm check       # 以上两项
 ```
 
-测试使用 Node 24 内置的 `node:sqlite` 模拟 D1（真实 SQL、外键与事务），直接调用 Worker 的 `handleRequest`，并监听真实 HTTP 端口做端到端校验。已额外通过 `wrangler dev`（真实 workerd + 本地 D1）与 `wrangler deploy --dry-run` 验证。
+测试使用 Node 24 内置的 `node:sqlite` 模拟 D1（真实 SQL、外键与事务），直接调用 Worker 的 `handleRequest`。开发过程中还通过 `wrangler dev`（真实 workerd + 本地 D1）、`wrangler deploy --dry-run` 以及真实 HTTP 请求完成了端到端验证。
 
 ## 常见问题
 
 **Q：部署后页面提示“服务端缺少 JWT_SECRET”？**
-按提示在 Cloudflare 控制台添加 Secret（或执行 `wrangler secret put JWT_SECRET`）后刷新。这是刻意设计的失败保护，不会用弱默认密钥启动。
+按提示在 Cloudflare 控制台添加 Secret（或执行 `pnpm exec wrangler secret put JWT_SECRET`）后刷新。这是刻意设计的失败保护，不会用弱默认密钥启动。
 
 **Q：修改 `JWT_SECRET` 后旧数据打不开？**
 是的。加密密钥由 `JWT_SECRET` 派生，密钥变化会导致 `decryption_failed`。请保持密钥稳定。

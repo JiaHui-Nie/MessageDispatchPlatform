@@ -368,7 +368,7 @@ function renderConfigError() {
           <li>Cloudflare 控制台：Workers → 本项目 → Settings → Variables and Secrets → 添加 <code>JWT_SECRET</code></li>
           <li>重新部署后刷新本页</li>
         </ol>
-        <p class="form-hint mt-4">注意：JWT_SECRET 同时用于加密数据库中的数据，部署后请勿随意更改。</p>
+        <p class="field-hint mt-4">注意：JWT_SECRET 同时用于加密数据库中的数据，部署后请勿随意更改。</p>
         <button class="btn btn-secondary btn-block mt-4" type="button" data-reload>重新检查</button>
       </div>
     </div>`;
@@ -432,6 +432,11 @@ function renderSetup() {
         </div>
         ${alertBox('info', '该密码只会设置一次，请妥善保存。设置完成后即可登录后台。')}
         <form class="form mt-4" id="setup-form" novalidate>
+          <label class="field">
+            <span>账号</span>
+            <input class="input" value="admin" disabled />
+            <small class="field-hint">管理员账号固定为 admin，不可修改。</small>
+          </label>
           <label class="field">
             <span>管理员密码</span>
             <input class="input" type="password" name="password" autocomplete="new-password" placeholder="至少 8 位，含字母与数字/符号" required autofocus />
