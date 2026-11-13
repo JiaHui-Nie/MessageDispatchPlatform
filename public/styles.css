@@ -1033,6 +1033,11 @@ th.nowrap {
   margin-top: 1px;
 }
 
+.alert > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .alert-error {
   background: var(--danger-soft);
   border-color: color-mix(in srgb, var(--danger) 25%, transparent);
