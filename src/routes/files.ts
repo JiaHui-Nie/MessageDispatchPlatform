@@ -282,20 +282,74 @@ function contentDisposition(filename: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
-function downloadHeaders(row: { content_type: string }, filename: string, size: number): Record<string, string> {
-  return {
+function downloadHeaders(
+  row: { content_type: string },
+  filename: string,
+  size: number,
+  options: { acceptRanges?: 'bytes' | 'none'; contentRange?: string; status?: number } = {},
+): Record<string, string> {
+  const headers: Record<string, string> = {
     'content-type': row.content_type,
     'content-length': String(size),
     'content-disposition': contentDisposition(filename),
+    'accept-ranges': options.acceptRanges ?? 'none',
     'cache-control': 'private, no-store',
     'x-content-type-options': 'nosniff',
     'content-security-policy': "sandbox; default-src 'none'",
     // 二进制响应无法在 JSON 体内返回 status，用响应头给出同一信息。
-    'x-api-status': '200',
+    'x-api-status': String(options.status ?? 200),
   };
+  if (options.contentRange) {
+    headers['content-range'] = options.contentRange;
+  }
+  return headers;
 }
 
-/** /downloadfile：GET（浏览器链接）或 POST 均可；私有文件需 api_key / 所有者会话。 */
+type ByteRange = { offset: number; length: number };
+
+/**
+ * 解析单段 Range。返回 null 表示忽略 Range（无 Range 或多段 Range），
+ * 'invalid' 表示范围不合法，应返回 416。
+ */
+function parseByteRange(header: string | null, total: number): ByteRange | null | 'invalid' {
+  if (!header) {
+    return null;
+  }
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+  if (!match) {
+    return null;
+  }
+  const [, rawStart, rawEnd] = match;
+  if (!rawStart && !rawEnd) {
+    return 'invalid';
+  }
+  if (!Number.isFinite(total) || total <= 0) {
+    return 'invalid';
+  }
+  let start: number;
+  let end: number;
+  if (!rawStart) {
+    const suffix = Number(rawEnd);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) {
+      return 'invalid';
+    }
+    start = Math.max(total - suffix, 0);
+    end = total - 1;
+  } else {
+    start = Number(rawStart);
+    if (!Number.isSafeInteger(start) || start < 0 || start >= total) {
+      return 'invalid';
+    }
+    end = rawEnd ? Number(rawEnd) : total - 1;
+    if (!Number.isSafeInteger(end) || end < start) {
+      return 'invalid';
+    }
+    end = Math.min(end, total - 1);
+  }
+  return { offset: start, length: end - start + 1 };
+}
+
+/** /downloadfile：GET / POST / HEAD；公开文件直接下载，私有文件需 api_key 或所有者会话。 */
 export async function downloadFile(ctx: AppContext, request: Request, params: Params): Promise<Response> {
   const fileId = (params.id ?? params.file_id ?? '').trim();
   if (!fileId) {
@@ -311,32 +365,94 @@ export async function downloadFile(ctx: AppContext, request: Request, params: Pa
 
   const filename = await decryptString(ctx.secret, row.name_enc);
   const plainR2 = row.storage === 'r2' && Number(row.encrypted ?? 1) === 0;
+  const isHead = request.method === 'HEAD';
 
-  // 浏览器直传的文件没有经过 Worker 端加密，直接流式返回，避免把大文件读进内存。
+  // 浏览器直传的文件没有经过 Worker 端加密，直接流式返回，并支持单段 Range。
   if (plainR2) {
     if (!ctx.files) {
       throw new ApiError(503, 'storage_not_configured', '该文件存储在 R2，但当前 Worker 未绑定 FILES');
     }
     const objectKey = fileObjectKey(row);
-    const object = request.method === 'HEAD' ? await ctx.files.head(objectKey) : await ctx.files.get(objectKey);
+    if (isHead) {
+      const object = await ctx.files.head(objectKey);
+      if (!object) {
+        throw notFound('file_not_found', '文件数据不存在或已被删除');
+      }
+      return new Response(null, {
+        status: 200,
+        headers: downloadHeaders(row, filename, Number(object.size), { acceptRanges: 'bytes' }),
+      });
+    }
+
+    const rangeHeader = request.headers.get('range');
+    let total = Number(row.size);
+    let parsed: ByteRange | null | 'invalid' = null;
+    if (rangeHeader) {
+      const head = await ctx.files.head(objectKey);
+      if (!head) {
+        throw notFound('file_not_found', '文件数据不存在或已被删除');
+      }
+      total = Number(head.size);
+      parsed = parseByteRange(rangeHeader, total);
+      if (parsed === 'invalid') {
+        return new Response(null, {
+          status: 416,
+          headers: {
+            'accept-ranges': 'bytes',
+            'content-range': `bytes */${total}`,
+            'cache-control': 'private, no-store',
+            'x-api-status': '416',
+          },
+        });
+      }
+    }
+
+    const object = parsed
+      ? await ctx.files.get(objectKey, { range: { offset: parsed.offset, length: parsed.length } })
+      : await ctx.files.get(objectKey);
     if (!object) {
       throw notFound('file_not_found', '文件数据不存在或已被删除');
     }
-    if (request.method !== 'HEAD') {
+    if (!rangeHeader) {
+      total = Number(object.size);
+    }
+    const objectRange = (object as R2ObjectBody).range;
+    const partial = Boolean(objectRange);
+    let start = 0;
+    let length = total;
+    if (objectRange) {
+      if ('suffix' in objectRange) {
+        start = Math.max(total - objectRange.suffix, 0);
+        length = total - start;
+      } else {
+        start = objectRange.offset ?? 0;
+        length = objectRange.length ?? total - start;
+      }
+    }
+    if (!partial) {
       await runStatement(ctx.db, 'UPDATE files SET downloads = downloads + 1 WHERE id = ?', [row.id]);
     }
-    const headers = downloadHeaders(row, filename, Number(object.size));
-    const body = request.method === 'HEAD' ? null : (object as R2ObjectBody).body;
-    return new Response(body, { status: 200, headers });
+    const headers = downloadHeaders(row, filename, length, {
+      acceptRanges: 'bytes',
+      ...(partial ? { contentRange: `bytes ${start}-${start + length - 1}/${total}`, status: 206 } : {}),
+    });
+    return new Response((object as R2ObjectBody).body, { status: partial ? 206 : 200, headers });
   }
 
+  // 应用层加密文件必须整体取出后解密，不支持 Range；HEAD 只返回元数据。
+  if (isHead) {
+    return new Response(null, {
+      status: 200,
+      headers: downloadHeaders(row, filename, Number(row.size), { acceptRanges: 'none' }),
+    });
+  }
   const bytes = await getFileContent(ctx, row);
   if (request.method !== 'HEAD') {
     await runStatement(ctx.db, 'UPDATE files SET downloads = downloads + 1 WHERE id = ?', [row.id]);
   }
-  return new Response(request.method === 'HEAD' ? null : bytes, {
+  return new Response(bytes, {
     status: 200,
-    headers: downloadHeaders(row, filename, bytes.length),
+    headers: downloadHeaders(row, filename, bytes.length, { acceptRanges: 'none' }),
   });
 }
 

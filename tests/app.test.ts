@@ -774,6 +774,17 @@ describe('文件存储', () => {
     );
     assert.equal(head.status, 200);
     assert.equal(head.headers.get('content-length'), String(Buffer.byteLength(content)));
+    assert.equal(head.headers.get('accept-ranges'), 'none');
+    assert.equal(await head.text(), '');
+
+    // 应用层加密文件不支持 Range，忽略 Range 并返回完整内容。
+    const ranged = await new TestClient(harness.env).download(String(upload.data.url_path), {
+      range: 'bytes=0-4',
+    });
+    assert.equal(ranged.status, 200);
+    assert.equal(ranged.headers.get('accept-ranges'), 'none');
+    assert.equal(ranged.headers.get('content-range'), null);
+    assert.equal(Buffer.from(await ranged.arrayBuffer()).toString('utf8'), content);
 
     const list = await alice.client.post<Record<string, any>>('/api/files/list');
     assert.equal(list.data.files.length, 1);
@@ -1186,6 +1197,35 @@ describe('R2 预签名直传', () => {
     assert.equal(downloaded.status, 200);
     assert.equal(downloaded.headers.get('content-length'), String(bytes.length));
     assert.equal(Buffer.from(await downloaded.arrayBuffer()).toString('hex'), Buffer.from(bytes).toString('hex'));
+
+    const partial = await alice.client.download(done.data.url_path, { range: 'bytes=2-4' });
+    assert.equal(partial.status, 206);
+    assert.equal(partial.headers.get('content-range'), `bytes 2-4/${bytes.length}`);
+    assert.equal(partial.headers.get('accept-ranges'), 'bytes');
+    assert.equal(partial.headers.get('x-api-status'), '206');
+    assert.equal(Buffer.from(await partial.arrayBuffer()).toString('hex'), Buffer.from(bytes.slice(2, 5)).toString('hex'));
+
+    const head = await handleRequest(
+      new Request(`${ORIGIN}${done.data.url_path}`, {
+        method: 'HEAD',
+        headers: { origin: ORIGIN, cookie: alice.client.cookie ?? '' },
+      }),
+      harness.env,
+    );
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('content-length'), String(bytes.length));
+    assert.equal(head.headers.get('accept-ranges'), 'bytes');
+    assert.equal(head.headers.get('x-api-status'), '200');
+    assert.equal(await head.text(), '');
+
+    const unsatisfiable = await alice.client.download(done.data.url_path, { range: 'bytes=99-100' });
+    assert.equal(unsatisfiable.status, 416);
+    assert.equal(unsatisfiable.headers.get('content-range'), `bytes */${bytes.length}`);
+
+    const downloads = harness.db.raw
+      .prepare('SELECT downloads FROM files WHERE id = ?')
+      .get(presign.data.file_id) as { downloads: number };
+    assert.equal(Number(downloads.downloads), 1, '只有完整 GET 计入下载次数');
 
     const removed = await alice.client.post('/api/files/delete', { id: presign.data.file_id });
     assert.equal(removed.status, 200);

@@ -35,7 +35,7 @@
 
 - **固定信息分发**：按 `key` 读写信息，公开信息可直接读取，私有信息需要 API Key。
 - **反馈对话**：访客无需注册即可提交反馈，拿到 `session_id` 后可持续追加消息；接收者在后台回复，支持未读/已读、筛选、删除。
-- **文件存储**：上传文件获得下载链接，内容加密后存入 D1（分块）或 R2（绑定后可在管理后台切换）；超过 20 MB 的文件可浏览器直传 R2，避开 Worker 内存限制；每个文件可单独设为公开或需要 API Key，管理员可限制每个用户的可用空间与新用户默认空间。
+- **文件存储**：上传文件获得下载链接，内容加密后存入 D1（分块）或 R2（绑定后可在管理后台切换）；超过 20 MB 的文件可浏览器直传 R2，避开 Worker 内存限制；直传文件支持 Range 断点下载；每个文件可单独设为公开或需要 API Key，管理员可限制每个用户的可用空间与新用户默认空间。
 - **在线 API 文档**：侧栏底部内置文档页，按接口分类展示参数、curl 示例、错误码与限制。
 - **多用户 + 注册码**：管理员生成一次性/限次注册码，用户凭码注册；管理员拥有普通用户的全部能力。
 - **API Key 管理**：每个账号最多 20 个 Key，名称备注、默认隐藏、可显示/复制/删除，Key 在数据库中只保存哈希与密文。
@@ -86,7 +86,7 @@
 
 4. **部署并初始化**
    - 保存后 Cloudflare 会触发构建部署；打开 `https://messagedispatchplatform.<你的子域>.workers.dev`，首次访问会要求为 `admin` 设置密码。
-   - 也可以用 `/api/health` 自检：`secret_configured: true`、`database: "ok"`、`schema_version: 3`。
+   - 也可以用 `/api/health` 自检：`secret_configured: true`、`database: "ok"`、`schema_version: 4`。
 
 5. （可选）在 **Settings → Domains & Routes** 绑定自定义域名。
 
@@ -234,6 +234,7 @@ pnpm db:migrate:local
 
 - 预签名 URL 有效期 15 分钟；上传完成后 Worker 用 `HEAD` 校验实际大小，再占用配额，超出配额会删除对象。
 - 直传文件仅依赖 **R2 服务端加密**（AES-256），不使用本项目的 `JWT_SECRET` 端到端加密；文件列表会标注「R2 直传」，Worker 上传的文件标注「应用加密」。
+- 预签名与登记接口只接受**登录态**，不支持 API Key；第三方 API 客户端请使用 `/api/uploadfile`（受 Worker 限制）。
 - 未完成的上传对象不计配额，但会留在桶里；可给 `files/` 前缀配置生命周期规则定期清理。
 - 浏览器直传必须配置 CORS，否则会在预检阶段被拦截。
 
@@ -455,13 +456,28 @@ curl -X POST "$BASE/api/uploadfile?api_key=$KEY" \
 }
 ```
 
-文件内容以 AES-256-GCM 加密后存入所选后端：D1 按 900 KB 分块，R2 写入单个对象。默认后端为 `auto`（有 R2 绑定用 R2，否则 D1），可在管理后台切换；返回的 `backend` 表示本次文件实际使用的后端。单个文件不设独立大小上限，只受剩余配额限制；超出配额返回 `413 storage_quota_exceeded`。
+文件内容以 AES-256-GCM 加密后存入所选后端：D1 按 900 KB 分块，R2 写入单个对象。默认后端为 `auto`（有 R2 绑定用 R2，否则 D1），可在管理后台切换；返回的 `backend` 表示本次文件实际使用的后端。单文件不设应用层独立上限，只受剩余配额和 R2 单次 PUT 上限约束；超出配额返回 `413 storage_quota_exceeded`。
+
+> `/api/uploadfile` 始终走 Worker，受请求体（Free/Pro 100 MB）和 128 MB 内存限制，**不会**因为阈值自动改走 R2；网页端的大文件自动直传是前端行为，第三方 API 不能使用直传接口。
+
+**API Key 支持范围**：
+
+| 接口 | API Key | 登录态 | 说明 |
+| --- | --- | --- | --- |
+| `/api/uploadfile` | ✅ | ✅ | Worker 上传，受平台限制 |
+| `/api/downloadfile` | ✅ | ✅ | 私有文件仅所有者 |
+| `/api/deletefile` | ✅ | ✅ | 删除并释放配额 |
+| `/api/files/list` | ❌ | ✅ | 文件列表与直传状态 |
+| `/api/files/presign` | ❌ | ✅ | 大文件预签名 |
+| `/api/files/complete` | ❌ | ✅ | 直传完成登记 |
+| `/api/files/visibility` | ❌ | ✅ | 切换公开/私有 |
 
 #### ⑩ 下载文件
 
 ```http
-GET /api/downloadfile?id=<file_id>
+GET  /api/downloadfile?id=<file_id>
 POST /api/downloadfile   { "id": "<file_id>" }
+HEAD /api/downloadfile?id=<file_id>
 ```
 
 | 参数 | 必填 | 说明 |
@@ -469,13 +485,48 @@ POST /api/downloadfile   { "id": "<file_id>" }
 | `id` | 是 | 上传时返回的 `file_id`（兼容 `file_id`） |
 | `api_key` | 否 | 私有文件需要；也可使用 `X-API-Key` 请求头 |
 
-公开文件可直接访问；私有文件需要所有者 API Key 或所有者登录态。响应为文件二进制：
+**权限**：
+
+| 文件可见性 | 所需凭据 |
+| --- | --- |
+| 公开 | 无 |
+| 私有 | 所有者 `api_key` 或所有者登录态 |
+
+无效 Key 返回 `403 invalid_api_key`；未提供凭据返回 `403 api_key_required`。
+
+**Range 与 HEAD**：
+
+- 浏览器直传的 R2 文件（`encrypted: false`，列表标注「R2 直传」）支持单段 `Range`，返回 `206`；
+- 应用层加密文件必须整体解密，会忽略 `Range` 并返回完整 `200`，且 `accept-ranges: none`；
+- 多段 Range 按完整文件返回 `200`；范围越界返回 `416`，带 `content-range: bytes */总大小`；
+- `HEAD` 只返回元数据，不返回正文；
+- 只有完整 GET 计入 `downloads`，Range 和 HEAD 不计数。
 
 ```http
-HTTP/1.1 200 OK
-content-type: application/pdf
-content-disposition: attachment; filename="report.pdf"; filename*=UTF-8''report.pdf
-x-api-status: 200
+HTTP/1.1 206 Partial Content
+content-type: application/octet-stream
+content-length: 1048576
+content-range: bytes 0-1048575/314572800
+accept-ranges: bytes
+content-disposition: attachment; filename="report.pdf"
+x-api-status: 206
+```
+
+```bash
+# 完整下载
+curl -L 'https://your-worker.workers.dev/api/downloadfile?id=8b1f…' -o report.pdf
+
+# 私有文件
+curl -L 'https://your-worker.workers.dev/api/downloadfile?id=8b1f…' \
+  -H 'x-api-key: mdp_xxx' -o report.pdf
+
+# 分段下载 / 断点续传
+curl -C - -L 'https://your-worker.workers.dev/api/downloadfile?id=8b1f…' -o report.pdf
+curl -L 'https://your-worker.workers.dev/api/downloadfile?id=8b1f…' \
+  -H 'Range: bytes=1048576-2097151' -o part2.bin
+
+# 只查看元数据
+curl -I 'https://your-worker.workers.dev/api/downloadfile?id=8b1f…'
 ```
 
 #### ⑪ 删除文件
@@ -587,8 +638,8 @@ GET /api/health
 ```
 
 ```json
-{ "status": 200, "app": "信息分发平台", "version": "1.3.1", "secret_configured": true,
-  "database": "ok", "schema_version": 3, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
+{ "status": 200, "app": "信息分发平台", "version": "1.4.0", "secret_configured": true,
+  "database": "ok", "schema_version": 4, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
 ```
 
 未配置 `JWT_SECRET` 或数据库异常时返回 `503`，便于监控告警。
@@ -805,6 +856,7 @@ pnpm check       # 以上两项
 18. **文件存储可选后端**：默认 D1，绑定 R2 后可在管理后台切换自动 / D1 / R2；每个文件记录实际后端，切换不影响旧文件；未绑定 R2 时自动降级到 D1 并给出明确提示。
 19. **大文件 R2 直传**：超过阈值（默认 20 MB）的文件使用预签名 URL 由浏览器直接上传到 R2，绕过 Worker 的 128 MB 内存与请求体限制；上传完成后由 Worker `HEAD` 校验大小、占用配额并登记元数据，超额自动删除对象。
 20. **修复 v3 数据库升级 500**：自动迁移此前会从头执行全部历史 SQL，v3 数据库会重复执行 `0003` 的 `ADD COLUMN storage` 而失败；现在只执行版本号大于当前值的迁移，并跳过已存在列的 `ADD COLUMN`。新增 v3→v4 升级测试。
+21. **下载 API 增强**：`/api/downloadfile` 支持 `HEAD` 与单段 `Range`；直传 R2 文件返回 `206`、`content-range` 和 `accept-ranges: bytes`，加密文件返回完整 `200` 且 `accept-ranges: none`；HEAD/Range 不计入下载次数。文档补充下载权限、响应头、Range 示例与 API Key 支持矩阵。
 
 ## License
 

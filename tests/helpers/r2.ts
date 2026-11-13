@@ -11,14 +11,21 @@ export class ShimR2 {
     return { key, size: bytes.length };
   }
 
-  async get(key: string) {
-    const bytes = this.objects.get(key);
-    if (!bytes) {
+  async get(key: string, options?: { range?: { offset: number; length?: number } }) {
+    const full = this.objects.get(key);
+    if (!full) {
       return null;
     }
+    const offset = options?.range?.offset ?? 0;
+    const length = options?.range?.length ?? full.length - offset;
+    if (offset < 0 || offset >= full.length || length <= 0) {
+      return null;
+    }
+    const bytes = full.slice(offset, offset + length);
     return {
       key,
-      size: bytes.length,
+      size: full.length,
+      range: options?.range ? { offset, length: bytes.length } : undefined,
       body: new ReadableStream<Uint8Array>({
         start(controller) {
           controller.enqueue(bytes.slice());

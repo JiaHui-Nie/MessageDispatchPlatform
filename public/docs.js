@@ -48,7 +48,7 @@ export function renderDocs(origin) {
   const quickstart = section(
     'quickstart',
     '快速开始',
-    `<p>所有平台接口使用 <code>POST</code> + JSON 请求体（文件下载支持 <code>GET</code>）。成功响应一定包含 <code>"status": 200</code>，错误响应的 HTTP 状态码与 <code>status</code> 一致。</p>
+    `<p>所有平台接口使用 <code>POST</code> + JSON 请求体（文件下载支持 <code>GET</code> / <code>POST</code> / <code>HEAD</code> 与单段 <code>Range</code>）。成功响应一定包含 <code>"status": 200</code>，错误响应的 HTTP 状态码与 <code>status</code> 一致。</p>
      <div class="docs-meta-grid">
        <div><span>API 基地址</span><code>${esc(base)}/api</code></div>
        <div><span>请求类型</span><code>application/json</code>（上传用 multipart）</div>
@@ -63,10 +63,10 @@ export function renderDocs(origin) {
        response: `{
   "status": 200,
   "app": "信息分发平台",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "secret_configured": true,
   "database": "ok",
-  "schema_version": 3,
+  "schema_version": 4,
   "needs_setup": false
 }`,
      })}
@@ -241,6 +241,14 @@ curl -X POST '${base}/api/setinformation?api_key=mdp_xxx' ...
        <div class="docs-card"><h4>配额</h4><p>每个用户有独立空间，默认 50 MB，管理员可以单独调整。</p></div>
        <div class="docs-card"><h4>访问控制</h4><p>每个文件可单独设置“私有”，私有文件必须提供所有者的 API Key 或登录态才能下载。</p></div>
      </div>
+     <h3>两条上传通道</h3>
+     <div class="table-wrap docs-table-wrap"><table class="docs-table">
+       <thead><tr><th>通道</th><th>适用大小</th><th>加密</th><th>认证</th><th>进度 / 续传</th></tr></thead>
+       <tbody>
+         <tr><td>Worker 上传<br><code>/api/uploadfile</code></td><td>≤ 阈值（默认 20 MB）</td><td>AES-256-GCM（<code>JWT_SECRET</code>）</td><td>API Key 或登录态</td><td>网页有进度；无续传</td></tr>
+         <tr><td>R2 直传<br><code>presign</code> → PUT → <code>complete</code></td><td>&gt; 阈值，最高约 4.995 GiB</td><td>仅 R2 服务端加密</td><td>仅登录态</td><td>网页有进度；单次 PUT，无续传</td></tr>
+       </tbody>
+     </table></div>
      ${endpoint({
        path: '/api/uploadfile',
        desc: '上传文件并返回下载链接。支持 <code>multipart/form-data</code>（字段名 <code>file</code>）或直接发送二进制体。',
@@ -251,7 +259,7 @@ curl -X POST '${base}/api/setinformation?api_key=mdp_xxx' ...
          ['private', false, '是否需要 API Key 才能下载，默认 <code>false</code>'],
          ['name', false, '覆盖文件名（最多 180 字符）'],
        ],
-       note: '文件大小只受用户剩余存储空间限制；超过 <code>DIRECT_UPLOAD_THRESHOLD_MB</code> 的文件会走 R2 直传。超出配额时返回 <code>413 storage_quota_exceeded</code>。',
+       note: '/api/uploadfile 只走 Worker，受请求体与内存限制；网页端超过 <code>DIRECT_UPLOAD_THRESHOLD_MB</code> 的文件会自动改用下面的 R2 直传接口，第三方 API Key 不能使用直传。',
        example: `# multipart
 curl -X POST '${base}/api/uploadfile?api_key=mdp_xxx' \\
   -F 'file=@./report.pdf' \\
@@ -274,26 +282,69 @@ curl -X POST '${base}/api/uploadfile?api_key=mdp_xxx' \\
   "storage": { "quota": 52428800, "used": 20480, "remaining": 52408320, "percent": 0, "file_count": 1 }
 }`,
      })}
+     <h3>下载接口详解</h3>
      ${endpoint({
        method: 'GET',
        path: '/api/downloadfile?id=…',
-       desc: '下载文件。公开文件可直接访问；私有文件需 <code>api_key</code> 查询参数、<code>X-API-Key</code> 头或所有者登录态。',
+       desc: '下载文件。支持 GET、POST 和 HEAD；公开文件可直接访问，私有文件需所有者 api_key、X-API-Key 头或登录态。',
        params: [
-         ['id', true, '上传时返回的 file_id'],
-         ['api_key', false, '私有文件必填（也可用 <code>X-API-Key</code> 头）'],
+         ['id', true, '文件 ID（兼容 <code>file_id</code>）'],
+         ['api_key', false, '私有文件必填（也可用 <code>X-API-Key</code> 请求头）'],
        ],
-       example: `curl -L '${base}/api/downloadfile?id=8b1f…&api_key=mdp_xxx' -o report.pdf
+       note: '公开文件无需鉴权；私有文件只允许文件所有者。下载是二进制响应，<code>status</code> 用响应头 <code>x-api-status</code> 表示（200 / 206 / 416）。',
+       example: `# 公开文件
+curl -L '${base}/api/downloadfile?id=8b1f…' -o report.pdf
 
-# 推荐：用请求头传递密钥
-curl -L '${base}/api/downloadfile?id=8b1f…' -H 'x-api-key: mdp_xxx' -o report.pdf`,
-       response: `HTTP/1.1 200 OK
-content-type: application/pdf
-content-disposition: attachment; filename="report.pdf"; filename*=UTF-8''report.pdf
-x-api-status: 200
+# 私有文件（推荐请求头）
+curl -L '${base}/api/downloadfile?id=8b1f…' \\
+  -H 'x-api-key: mdp_xxx' -o report.pdf
 
-<文件二进制内容>`,
-       note: '下载是二进制响应，无法在 JSON 中返回 <code>status</code>，因此使用响应头 <code>x-api-status: 200</code>。',
+# HEAD：只取元数据
+curl -I '${base}/api/downloadfile?id=8b1f…'
+
+# Range：直传 R2 文件可分段下载（0–1 MiB）
+curl -L '${base}/api/downloadfile?id=8b1f…' \\
+  -H 'Range: bytes=0-1048575' -o part1.bin
+
+# 断点续传（curl 自动发送 Range）
+curl -C - -L '${base}/api/downloadfile?id=8b1f…' -o report.pdf`,
+       response: `HTTP/1.1 206 Partial Content
+content-type: application/octet-stream
+content-length: 1048576
+content-range: bytes 0-1048575/314572800
+accept-ranges: bytes
+content-disposition: attachment; filename="report.pdf"
+x-api-status: 206
+
+<对应字节>`,
      })}
+     <div class="table-wrap docs-table-wrap"><table class="docs-table">
+       <thead><tr><th>响应头</th><th>说明</th></tr></thead>
+       <tbody>
+         <tr><td><code>content-type</code></td><td>上传时记录的文件类型</td></tr>
+         <tr><td><code>content-length</code></td><td>本次响应字节数；Range 响应为片段长度</td></tr>
+         <tr><td><code>content-range</code></td><td>仅 206，如 <code>bytes 0-1048575/314572800</code></td></tr>
+         <tr><td><code>accept-ranges</code></td><td>直传 R2 文件为 <code>bytes</code>；应用加密文件为 <code>none</code></td></tr>
+         <tr><td><code>content-disposition</code></td><td>附件下载，包含 UTF-8 文件名</td></tr>
+         <tr><td><code>x-api-status</code></td><td>二进制响应的状态码：200 / 206 / 416</td></tr>
+       </tbody>
+     </table></div>
+     <h4>Range 与下载计数规则</h4>
+     <ul>
+       <li>只有浏览器直传的 R2 文件（列表标注「R2 直传」）支持单段 <code>Range</code>，返回 <code>206</code>；</li>
+       <li>应用层加密文件必须整体解密，会忽略 Range 并返回 <code>200</code> 完整内容，且 <code>accept-ranges: none</code>；</li>
+       <li>多段 Range 会按完整文件返回 <code>200</code>；范围越界返回 <code>416</code>，并带 <code>content-range: bytes */总大小</code>；</li>
+       <li><code>HEAD</code> 只返回元数据，不返回正文，也不增加下载次数；</li>
+       <li>只有完整 GET 计入 <code>downloads</code>，Range 和 HEAD 不计数。</li>
+     </ul>
+     <h4>下载权限</h4>
+     <div class="table-wrap docs-table-wrap"><table class="docs-table">
+       <thead><tr><th>文件可见性</th><th>所需凭据</th><th>说明</th></tr></thead>
+       <tbody>
+         <tr><td>公开</td><td>无</td><td>任何人拿到链接即可下载</td></tr>
+         <tr><td>私有</td><td>所有者 <code>api_key</code> 或所有者登录态</td><td>无效 Key 返回 <code>403 invalid_api_key</code>；未提供凭据返回 <code>403 api_key_required</code></td></tr>
+       </tbody>
+     </table></div>
      ${endpoint({
        path: '/api/deletefile',
        desc: '删除文件并释放配额。',
@@ -304,6 +355,59 @@ x-api-status: 200
        ],
        response: `{ "status": 200, "file_id": "8b1f…", "deleted": true, "size": 20480, "storage": { "used": 0 } }`,
      })}
+     <h3>大文件直传完整流程</h3>
+     <ol>
+       <li>网页带登录 Cookie 请求 <code>POST /api/files/presign</code>，拿到 <code>file_id</code>、<code>upload_url</code> 和 <code>headers</code>；</li>
+       <li>浏览器用 <code>PUT</code> 把文件直接发到 <code>upload_url</code>，<code>Content-Type</code> 必须与 presign 时一致；</li>
+       <li>PUT 成功后请求 <code>POST /api/files/complete</code>，Worker 用 <code>HEAD</code> 读取真实大小、占用配额并写入文件列表。</li>
+     </ol>
+     ${codeBlock(`// 1. 预签名（同源，自动带登录 Cookie）
+const presign = await fetch('/api/files/presign', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  credentials: 'include',
+  body: JSON.stringify({
+    name: file.name,
+    size: file.size,
+    content_type: file.type || 'application/octet-stream',
+    private: true,
+  }),
+}).then((response) => response.json());
+
+// 2. 直接 PUT 到 R2（不经过 Worker，不携带 Cookie）
+await fetch(presign.upload_url, {
+  method: 'PUT',
+  headers: presign.headers,
+  body: file,
+});
+
+// 3. 登记元数据并占用配额
+await fetch('/api/files/complete', {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  credentials: 'include',
+  body: JSON.stringify({
+    file_id: presign.file_id,
+    name: file.name,
+    content_type: file.type || 'application/octet-stream',
+    private: true,
+  }),
+});`)}
+     <p class="field-hint">R2 桶 CORS 必须允许你的站点来源、<code>PUT</code> 方法和 <code>content-type</code> 请求头；否则浏览器会在预检阶段拦截。预签名 URL 是 bearer token，15 分钟内有效，请勿写入日志或公开分享。</p>
+     <h3>API Key 支持范围</h3>
+     <div class="table-wrap docs-table-wrap"><table class="docs-table">
+       <thead><tr><th>接口</th><th>API Key</th><th>登录态</th><th>说明</th></tr></thead>
+       <tbody>
+         <tr><td><code>/api/uploadfile</code></td><td>✅</td><td>✅</td><td>小文件 / Worker 限额内</td></tr>
+         <tr><td><code>/api/downloadfile</code></td><td>✅</td><td>✅</td><td>私有文件仅所有者</td></tr>
+         <tr><td><code>/api/deletefile</code></td><td>✅</td><td>✅</td><td>删除并释放配额</td></tr>
+         <tr><td><code>/api/files/list</code></td><td>❌</td><td>✅</td><td>网页后台文件列表</td></tr>
+         <tr><td><code>/api/files/presign</code></td><td>❌</td><td>✅</td><td>大文件直传预签名</td></tr>
+         <tr><td><code>/api/files/complete</code></td><td>❌</td><td>✅</td><td>直传完成登记</td></tr>
+         <tr><td><code>/api/files/visibility</code></td><td>❌</td><td>✅</td><td>切换公开/私有</td></tr>
+       </tbody>
+     </table></div>
+     <p class="field-hint">大文件直传目前只对网页登录态开放；第三方 API 客户端如需大文件，请先使用 <code>/api/uploadfile</code>（受 Worker 限制），或等待后续 multipart 接口。</p>
      <h3>网页后台接口</h3>
      ${endpoint({
        path: '/api/files/list',
@@ -319,7 +423,7 @@ x-api-status: 200
          ['content_type', false, '默认 <code>application/octet-stream</code>，须与 PUT 一致'],
          ['private', false, '是否需要 API Key 才能下载'],
        ],
-       note: '返回的 <code>upload_url</code> 15 分钟内有效；浏览器直接 PUT 到 R2，不经过 Worker。R2 桶需配置 CORS。',
+       note: '返回的 <code>upload_url</code> 15 分钟内有效；浏览器直接 PUT 到 R2，不经过 Worker。只支持登录态；R2 桶需配置 CORS（允许来源、PUT 和 <code>content-type</code>），且 <code>R2_BUCKET_NAME</code> 必须与 <code>FILES</code> 绑定桶一致。',
        response: `{ "status": 200, "file_id": "8b1f…", "upload_url": "https://<bucket>.<account>.r2.cloudflarestorage.com/files/1/8b1f…?X-Amz-…", "method": "PUT", "headers": { "content-type": "application/pdf" }, "expires_in": 900 }`,
      })}
      ${endpoint({
@@ -331,6 +435,7 @@ x-api-status: 200
          ['content_type', false, '与 PUT 时一致'],
          ['private', false, '是否私有'],
        ],
+       note: '对象不存在返回 <code>404 upload_not_found</code>；实际大小超过剩余配额返回 <code>413 storage_quota_exceeded</code>，并自动删除 R2 对象。直传文件只依赖 R2 服务端加密（<code>encrypted: false</code>）。',
        response: `{ "status": 200, "file_id": "8b1f…", "name": "report.pdf", "size": 20480, "encrypted": false, "backend": "r2", "direct": true, "storage": { "used": 20480 } }`,
      })}
      ${endpoint({
@@ -400,6 +505,7 @@ x-api-status: 200
         <tr><td>403</td><td><code>feedback_disabled</code> / <code>admin_required</code></td><td>反馈未开启 / 需要管理员</td></tr>
         <tr><td>404</td><td><code>not_found</code> / <code>file_not_found</code> / <code>upload_not_found</code></td><td>资源不存在</td></tr>
         <tr><td>413</td><td><code>storage_quota_exceeded</code></td><td>剩余存储空间不足</td></tr>
+        <tr><td>416</td><td>—（无 JSON body）</td><td>Range 越界，响应头含 <code>content-range: bytes */总大小</code></td></tr>
         <tr><td>503</td><td><code>direct_upload_unavailable</code></td><td>未配置 R2 直传或后端不是 R2</td></tr>
         <tr><td>429</td><td><code>rate_limited</code></td><td>触发限流，响应带 <code>Retry-After</code></td></tr>
       </tbody>
