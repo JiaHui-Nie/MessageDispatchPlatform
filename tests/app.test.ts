@@ -1398,6 +1398,74 @@ describe('数据库与接口一致性', () => {
     assert.equal(again.status, 200);
   });
 
+  it('从 v3 数据库只应用 0004 迁移，不重复执行 0003', async () => {
+    const db = new ShimD1();
+    const applyMigration = (file: string) => {
+      const sql = readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8');
+      for (const part of sql.split('--> statement-breakpoint')) {
+        const statement = part.trim();
+        if (statement && !/^(--[^\n]*\n?)+$/.test(statement)) {
+          db.raw.exec(statement);
+        }
+      }
+    };
+    applyMigration('0001_init.sql');
+    applyMigration('0002_file_storage.sql');
+    applyMigration('0003_file_storage_backend.sql');
+    const now = new Date().toISOString();
+    db.raw.prepare(`UPDATE meta SET value = '3' WHERE key = 'schema_version'`).run();
+    db.raw
+      .prepare(
+        `INSERT INTO users (username, display_name, password_hash, role, feedback_enabled, created_at, updated_at)
+         VALUES ('legacy', 'legacy', 'pbkdf2$10000$AAAA$BBBB', 'user', 0, ?, ?)`,
+      )
+      .run(now, now);
+    db.raw
+      .prepare(`INSERT INTO user_storage (user_id, quota, used, updated_at) VALUES (1, 52428800, 0, ?)`)
+      .run(now);
+    db.raw
+      .prepare(
+        `INSERT INTO files (id, user_id, name_enc, size, chunk_count, content_type, private, downloads, created_at, storage)
+         VALUES ('legacyfile', 1, 'encrypted-name', 4, 1, 'text/plain', 1, 0, ?, 'd1')`,
+      )
+      .run(now);
+
+    const env = {
+      DB: db as unknown as D1Database,
+      JWT_SECRET: TEST_SECRET,
+      APP_NAME: '升级测试',
+      DISPLAY_TZ: 'Asia/Shanghai',
+      PASSWORD_ITERATIONS: '10000',
+      RATE_LIMIT_DISABLED: '1',
+    };
+    const status = await handleRequest(
+      new Request(`${ORIGIN}/api/auth/status`, { method: 'POST', headers: { origin: ORIGIN } }),
+      env,
+    );
+    assert.equal(status.status, 200, 'v3 数据库不应因重复执行 0003 而返回 500');
+
+    const versionRow = db.raw.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as {
+      value: string;
+    };
+    assert.equal(versionRow.value, '4');
+    const fileColumns = db.raw.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>;
+    for (const name of ['encrypted', 'object_key']) {
+      assert.ok(fileColumns.some((column) => column.name === name), `files 表应包含 ${name} 列`);
+    }
+    const legacy = db.raw.prepare('SELECT encrypted, object_key FROM files WHERE id = ?').get('legacyfile') as {
+      encrypted: number;
+      object_key: string | null;
+    };
+    assert.equal(Number(legacy.encrypted), 1);
+    assert.equal(legacy.object_key, null);
+
+    const again = await handleRequest(
+      new Request(`${ORIGIN}/api/auth/status`, { method: 'POST', headers: { origin: ORIGIN } }),
+      env,
+    );
+    assert.equal(again.status, 200);
+  });
+
   it('概览接口返回统计与最近反馈', async () => {
     const harness = createHarness();
     await setupAdmin(harness);

@@ -63,7 +63,7 @@ export function renderDocs(origin) {
        response: `{
   "status": 200,
   "app": "信息分发平台",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "secret_configured": true,
   "database": "ok",
   "schema_version": 3,

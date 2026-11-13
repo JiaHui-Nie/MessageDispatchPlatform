@@ -1,4 +1,4 @@
-// 从 migrations/0001_init.sql 生成 src/db/schema.generated.ts。
+// 从 migrations/*.sql 生成 src/db/schema.generated.ts。
 //
 // 迁移 SQL 是唯一的表结构来源：D1 的 `wrangler d1 migrations apply` 直接执行它，
 // 而 Worker 首次请求时的自动建表则使用生成的 TypeScript 常量。
@@ -19,31 +19,57 @@ if (migrationFiles.length === 0) {
   throw new Error('migrations/ 目录中没有找到形如 0001_init.sql 的迁移文件');
 }
 
-const statements = [];
+const migrations = [];
 let schemaVersion = 0;
+let statementCount = 0;
 
 for (const fileName of migrationFiles) {
-  schemaVersion = Math.max(schemaVersion, Number.parseInt(fileName.slice(0, 4), 10));
+  const version = Number.parseInt(fileName.slice(0, 4), 10);
+  schemaVersion = Math.max(schemaVersion, version);
   const sql = readFileSync(join(migrationsDir, fileName), 'utf8');
-  const parts = sql
+  const statements = sql
     .split('--> statement-breakpoint')
     .map((part) => part.trim())
     .filter((part) => part.length > 0 && !/^(--[^\n]*\n?)+$/.test(part));
-  statements.push(...parts);
+  migrations.push({ version, statements });
+  statementCount += statements.length;
 }
 
-const quoted = statements
-  .map((statement) => `  \`${statement.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${')}\`,`)
+function quoteStatement(statement, indent) {
+  const escaped = statement.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
+  return `${indent}\`${escaped}\`,`;
+}
+
+const migrationBlocks = migrations
+  .map(({ version, statements }) => {
+    const quoted = statements.map((statement) => quoteStatement(statement, '      ')).join('\n');
+    return `  {
+    version: ${version},
+    statements: [
+${quoted}
+    ],
+  },`;
+  })
   .join('\n');
 
 const output = `// 此文件由 scripts/gen-schema.mjs 自动生成，请勿手动修改。
-// 来源：migrations/0001_init.sql（修改后运行 pnpm run gen:schema）。
+// 来源：migrations/*.sql（修改后运行 pnpm run gen:schema）。
+export interface SchemaMigration {
+  version: number;
+  statements: readonly string[];
+}
+
 export const SCHEMA_VERSION = ${schemaVersion};
 
-export const SCHEMA_STATEMENTS: readonly string[] = [
-${quoted}
+export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
+${migrationBlocks}
 ];
+
+/** 扁平化后的全部语句，供测试与工具校验使用。 */
+export const SCHEMA_STATEMENTS: readonly string[] = SCHEMA_MIGRATIONS.flatMap(
+  (migration) => migration.statements,
+);
 `;
 
 writeFileSync(outputFile, output, 'utf8');
-console.log(`已生成 ${outputFile}（schema v${schemaVersion}，${statements.length} 条语句）`);
+console.log(`已生成 ${outputFile}（schema v${schemaVersion}，${migrations.length} 个迁移、${statementCount} 条语句）`);

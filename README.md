@@ -587,7 +587,7 @@ GET /api/health
 ```
 
 ```json
-{ "status": 200, "app": "信息分发平台", "version": "1.3.0", "secret_configured": true,
+{ "status": 200, "app": "信息分发平台", "version": "1.3.1", "secret_configured": true,
   "database": "ok", "schema_version": 3, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
 ```
 
@@ -739,7 +739,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 ## 测试
 
 ```bash
-pnpm test        # 37 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2、直传、配额、越权、限流、管理后台
+pnpm test        # 38 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2、直传、配额、越权、限流、管理后台
 pnpm typecheck
 pnpm check       # 以上两项
 ```
@@ -804,6 +804,7 @@ pnpm check       # 以上两项
 17. **README 与登录页**：移除一键部署按钮，改为说明如何在 Cloudflare Workers 中连接 GitHub 仓库；登录页底部标注开源项目地址。
 18. **文件存储可选后端**：默认 D1，绑定 R2 后可在管理后台切换自动 / D1 / R2；每个文件记录实际后端，切换不影响旧文件；未绑定 R2 时自动降级到 D1 并给出明确提示。
 19. **大文件 R2 直传**：超过阈值（默认 20 MB）的文件使用预签名 URL 由浏览器直接上传到 R2，绕过 Worker 的 128 MB 内存与请求体限制；上传完成后由 Worker `HEAD` 校验大小、占用配额并登记元数据，超额自动删除对象。
+20. **修复 v3 数据库升级 500**：自动迁移此前会从头执行全部历史 SQL，v3 数据库会重复执行 `0003` 的 `ADD COLUMN storage` 而失败；现在只执行版本号大于当前值的迁移，并跳过已存在列的 `ADD COLUMN`。新增 v3→v4 升级测试。
 
 ## License
 

@@ -1,5 +1,5 @@
 import { nowIso } from '../lib/time.ts';
-import { SCHEMA_STATEMENTS, SCHEMA_VERSION } from './schema.generated.ts';
+import { SCHEMA_MIGRATIONS, SCHEMA_VERSION } from './schema.generated.ts';
 
 /** D1 通用查询工具。所有 SQL 都使用参数绑定，避免注入。 */
 
@@ -61,10 +61,47 @@ async function applySchemaIfNeeded(db: D1Database): Promise<void> {
   if (current >= SCHEMA_VERSION) {
     return;
   }
-  const statements = [
-    ...SCHEMA_STATEMENTS,
+
+  // 只执行尚未应用的迁移。历史迁移里的 ALTER TABLE 不是幂等的，
+  // 不能像建表语句那样每次从头执行一遍。
+  const pending = SCHEMA_MIGRATIONS.filter((migration) => migration.version > current);
+  const columnsByTable = new Map<string, Set<string>>();
+  const statements: string[] = [];
+
+  for (const migration of pending) {
+    for (const sql of migration.statements) {
+      // 兼容“迁移执行到一半失败”的数据库：列已存在时跳过对应的 ADD COLUMN。
+      const alter = /ALTER\s+TABLE\s+["`]?([A-Za-z0-9_]+)["`]?\s+ADD\s+COLUMN\s+["`]?([A-Za-z0-9_]+)["`]?/i.exec(
+        sql,
+      );
+      if (alter) {
+        const table = alter[1];
+        let columns = columnsByTable.get(table);
+        if (!columns) {
+          columns = await existingColumns(db, table);
+          columnsByTable.set(table, columns);
+        }
+        if (columns.has(alter[2].toLowerCase())) {
+          continue;
+        }
+      }
+      statements.push(sql);
+    }
+  }
+
+  statements.push(
     `INSERT INTO meta (key, value, updated_at) VALUES ('schema_version', '${SCHEMA_VERSION}', '${nowIso()}')
      ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-  ];
+  );
   await db.batch(statements.map((sql) => db.prepare(sql)));
+}
+
+async function existingColumns(db: D1Database, table: string): Promise<Set<string>> {
+  try {
+    const result = await db.prepare(`PRAGMA table_info("${table.replace(/"/g, '""')}")`).all<{ name: string }>();
+    return new Set((result.results ?? []).map((row) => String(row.name).toLowerCase()));
+  } catch {
+    // 表还不存在（例如全新数据库，后续迁移会 CREATE TABLE）
+    return new Set();
+  }
 }
