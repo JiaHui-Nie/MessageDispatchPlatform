@@ -1,6 +1,7 @@
 import { getAdminStats } from '../data/stats.ts';
 import { countAdmins, deleteUser, findUserById, listUsersWithStats, updateUserPassword } from '../data/users.ts';
 import { createRegistrationCode, listRegistrationCodes, revokeRegistrationCode } from '../data/registration.ts';
+import { getDefaultQuota, getPlatformStorage, setDefaultQuota, setUserQuota } from '../data/storage.ts';
 import { requireAdmin } from '../auth/session.ts';
 import { issueSessionToken, buildSessionCookie } from '../auth/session.ts';
 import type { AppContext } from '../env.ts';
@@ -8,6 +9,8 @@ import { hashPassword } from '../lib/crypto.ts';
 import { badRequest, notFound } from '../lib/errors.ts';
 import { intParam, ok, optionalString, stringParam, type Params } from '../lib/http.ts';
 import { LIMITS, validatePassword } from '../lib/validate.ts';
+
+const MB = 1024 * 1024;
 
 export async function stats(ctx: AppContext, request: Request): Promise<Response> {
   await requireAdmin(ctx, request);
@@ -37,7 +40,45 @@ export async function codesRevoke(ctx: AppContext, request: Request, params: Par
 
 export async function usersList(ctx: AppContext, request: Request): Promise<Response> {
   await requireAdmin(ctx, request);
-  return ok({ users: await listUsersWithStats(ctx.db, ctx.tz) });
+  const defaultQuota = await getDefaultQuota(ctx);
+  return ok({
+    users: await listUsersWithStats(ctx.db, ctx.tz, defaultQuota),
+    default_quota: defaultQuota,
+  });
+}
+
+/** 平台默认存储空间与总用量（管理员）。 */
+export async function storageSettings(ctx: AppContext, request: Request, params: Params): Promise<Response> {
+  await requireAdmin(ctx, request);
+  if (params.default_quota_mb !== undefined) {
+    const quotaMb = intParam(params, 'default_quota_mb', { min: 0, max: 10_240, label: '默认存储空间' });
+    await setDefaultQuota(ctx, quotaMb * MB);
+  }
+  const [defaultQuota, platformStorage] = await Promise.all([getDefaultQuota(ctx), getPlatformStorage(ctx.db)]);
+  return ok({
+    default_quota: defaultQuota,
+    default_quota_mb: Math.round((defaultQuota / MB) * 10) / 10,
+    total_used: platformStorage.used,
+    file_count: platformStorage.files,
+    max_file_size: ctx.maxFileSizeBytes,
+  });
+}
+
+/** 调整单个已注册用户的存储空间。 */
+export async function usersStorage(ctx: AppContext, request: Request, params: Params): Promise<Response> {
+  await requireAdmin(ctx, request);
+  const id = intParam(params, 'id', { min: 1, label: '用户 ID' });
+  const quotaMb = intParam(params, 'quota_mb', { min: 0, max: 10_240, label: '存储空间' });
+  const target = await findUserById(ctx.db, id);
+  if (!target) {
+    throw notFound('user_not_found', '用户不存在');
+  }
+  return ok({
+    id,
+    username: target.username,
+    storage: await setUserQuota(ctx, id, quotaMb * MB),
+    quota_mb: quotaMb,
+  });
 }
 
 export async function usersDelete(ctx: AppContext, request: Request, params: Params): Promise<Response> {

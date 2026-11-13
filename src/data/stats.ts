@@ -4,6 +4,7 @@ import { countApiKeys } from './apikeys.ts';
 import { countFeedbackSessions } from './feedback.ts';
 import { countInformation } from './information.ts';
 import { countActiveRegistrationCodes } from './registration.ts';
+import { getDefaultQuota, getPlatformStorage } from './storage.ts';
 import { countAdmins, countUsers } from './users.ts';
 
 export interface UserStats {
@@ -32,6 +33,9 @@ export interface AdminStats {
   messages: number;
   api_keys: number;
   active_codes: number;
+  files: number;
+  storage_used: number;
+  default_storage_quota: number;
 }
 
 export async function getAdminStats(ctx: AppContext): Promise<AdminStats> {
@@ -39,16 +43,19 @@ export async function getAdminStats(ctx: AppContext): Promise<AdminStats> {
     const row = await firstRow<{ total: number }>(ctx.db, sql);
     return Number(row?.total ?? 0);
   };
-  const [users, admins, information, feedback, unread, messages, apiKeys, activeCodes] = await Promise.all([
-    countUsers(ctx.db),
-    countAdmins(ctx.db),
-    count('SELECT COUNT(*) AS total FROM information'),
-    count('SELECT COUNT(*) AS total FROM feedback_sessions'),
-    count(`SELECT COUNT(*) AS total FROM feedback_sessions WHERE status = 'unread'`),
-    count('SELECT COUNT(*) AS total FROM feedback_messages'),
-    count('SELECT COUNT(*) AS total FROM api_keys'),
-    countActiveRegistrationCodes(ctx.db),
-  ]);
+  const [users, admins, information, feedback, unread, messages, apiKeys, activeCodes, platformStorage, defaultQuota] =
+    await Promise.all([
+      countUsers(ctx.db),
+      countAdmins(ctx.db),
+      count('SELECT COUNT(*) AS total FROM information'),
+      count('SELECT COUNT(*) AS total FROM feedback_sessions'),
+      count(`SELECT COUNT(*) AS total FROM feedback_sessions WHERE status = 'unread'`),
+      count('SELECT COUNT(*) AS total FROM feedback_messages'),
+      count('SELECT COUNT(*) AS total FROM api_keys'),
+      countActiveRegistrationCodes(ctx.db),
+      getPlatformStorage(ctx.db),
+      getDefaultQuota(ctx),
+    ]);
   return {
     users,
     admins,
@@ -58,5 +65,8 @@ export async function getAdminStats(ctx: AppContext): Promise<AdminStats> {
     messages,
     api_keys: apiKeys,
     active_codes: activeCodes,
+    files: platformStorage.files,
+    storage_used: platformStorage.used,
+    default_storage_quota: defaultQuota,
   };
 }

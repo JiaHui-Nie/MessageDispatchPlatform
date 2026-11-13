@@ -52,3 +52,7 @@ export function conflict(code: string, message: string): ApiError {
 export function tooManyRequests(retryAfter: number, message = '操作过于频繁，请稍后再试'): ApiError {
   return new ApiError(429, 'rate_limited', message, { retryAfter });
 }
+
+export function payloadTooLarge(code: string, message: string, details?: Record<string, unknown>): ApiError {
+  return new ApiError(413, code, message, { details });
+}

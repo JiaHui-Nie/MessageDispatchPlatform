@@ -32,6 +32,8 @@
     "APP_NAME": "信息分发平台",
     "DISPLAY_TZ": "Asia/Shanghai",
     "SESSION_TTL_HOURS": "168",
-    "PASSWORD_ITERATIONS": "100000"
+    "PASSWORD_ITERATIONS": "100000",
+    "MAX_FILE_SIZE_MB": "10",
+    "DEFAULT_STORAGE_QUOTA_MB": "50"
   }
 }

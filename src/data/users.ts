@@ -3,6 +3,7 @@ import { hashPassword, verifyPassword, getDummyPasswordHash } from '../lib/crypt
 import { badRequest, conflict, unauthorized } from '../lib/errors.ts';
 import { formatTime, nowIso } from '../lib/time.ts';
 import { normalizeUsername, validatePassword, validateUsername, LIMITS } from '../lib/validate.ts';
+import { fileDeletionStatements } from './storage.ts';
 
 export interface UserRow {
   id: number;
@@ -33,6 +34,9 @@ export interface UserWithStats extends PublicUser {
   info_count: number;
   feedback_count: number;
   api_key_count: number;
+  file_count: number;
+  storage_quota: number;
+  storage_used: number;
 }
 
 export function mapUser(row: UserRow): UserRow {
@@ -105,6 +109,7 @@ export async function deleteUser(db: D1Database, userId: number): Promise<boolea
     userId,
   ]);
   const statements = [
+    ...fileDeletionStatements(db, userId),
     ...sessions.map((session) => db.prepare('DELETE FROM feedback_messages WHERE session_id = ?').bind(session.session_id)),
     db.prepare('DELETE FROM feedback_sessions WHERE user_id = ?').bind(userId),
     db.prepare('DELETE FROM information WHERE user_id = ?').bind(userId),
@@ -116,24 +121,44 @@ export async function deleteUser(db: D1Database, userId: number): Promise<boolea
   return Number(lastResult?.meta?.changes ?? 0) > 0;
 }
 
-export async function listUsersWithStats(db: D1Database, timeZone: string): Promise<UserWithStats[]> {
+export async function listUsersWithStats(
+  db: D1Database,
+  timeZone: string,
+  defaultQuota: number,
+): Promise<UserWithStats[]> {
   const result = await db
     .prepare(
       `SELECT u.*,
               (SELECT COUNT(*) FROM information i WHERE i.user_id = u.id) AS info_count,
               (SELECT COUNT(*) FROM feedback_sessions f WHERE f.user_id = u.id) AS feedback_count,
-              (SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id) AS api_key_count
+              (SELECT COUNT(*) FROM api_keys k WHERE k.user_id = u.id) AS api_key_count,
+              (SELECT COUNT(*) FROM files fi WHERE fi.user_id = u.id) AS file_count,
+              COALESCE(s.quota, ?) AS storage_quota,
+              COALESCE(s.used, 0) AS storage_used
        FROM users u
+       LEFT JOIN user_storage s ON s.user_id = u.id
        ORDER BY u.id ASC
        LIMIT ?`,
     )
-    .bind(LIMITS.adminListLimit)
-    .all<UserRow & { info_count: number; feedback_count: number; api_key_count: number }>();
+    .bind(defaultQuota, LIMITS.adminListLimit)
+    .all<
+      UserRow & {
+        info_count: number;
+        feedback_count: number;
+        api_key_count: number;
+        file_count: number;
+        storage_quota: number;
+        storage_used: number;
+      }
+    >();
   return (result.results ?? []).map((row) => ({
     ...toPublicUser(mapUser(row), timeZone),
     info_count: Number(row.info_count ?? 0),
     feedback_count: Number(row.feedback_count ?? 0),
     api_key_count: Number(row.api_key_count ?? 0),
+    file_count: Number(row.file_count ?? 0),
+    storage_quota: Number(row.storage_quota ?? defaultQuota),
+    storage_used: Number(row.storage_used ?? 0),
   }));
 }
 

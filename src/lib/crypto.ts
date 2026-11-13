@@ -93,8 +93,38 @@ export async function decryptString(secret: string, stored: string): Promise<str
   }
 }
 
-async function pbkdf2(password: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {
-  const material = await crypto.subtle.importKey('raw', encodeUtf8(password), 'PBKDF2', false, ['deriveBits']);
+/**
+ * 二进制加密：输出 `iv(12 字节) || AES-GCM 密文+tag`。
+ * 文件内容按块存储，这里先整体加密再切块，下载时按序拼接后解密。
+ */
+export async function encryptBytes(secret: string, plaintext: Uint8Array): Promise<Uint8Array> {
+  const key = await getAesKey(secret);
+  const iv = randomBytes(12);
+  const ciphertext = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, plaintext),
+  );
+  const payload = new Uint8Array(iv.length + ciphertext.length);
+  payload.set(iv, 0);
+  payload.set(ciphertext, iv.length);
+  return payload;
+}
+
+export async function decryptBytes(secret: string, payload: Uint8Array): Promise<Uint8Array> {
+  if (payload.length < 12 + 16) {
+    throw new DecryptionError('文件密文格式不正确');
+  }
+  const iv = payload.slice(0, 12);
+  const ciphertext = payload.slice(12);
+  try {
+    const key = await getAesKey(secret);
+    const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, key, ciphertext);
+    return new Uint8Array(plaintext);
+  } catch {
+    throw new DecryptionError('文件解密失败，JWT_SECRET 可能与上传时不一致');
+  }
+}
+
+async function pbkdf2(password: string, salt: Uint8Array, iterations: number): Promise<Uint8Array> {  const material = await crypto.subtle.importKey('raw', encodeUtf8(password), 'PBKDF2', false, ['deriveBits']);
   const bits = await crypto.subtle.deriveBits(
     { name: 'PBKDF2', salt, iterations, hash: PBKDF2_HASH },
     material,

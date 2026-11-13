@@ -6,7 +6,7 @@
 注册：这个平台可以通过worker打开web管理界面，第一次登陆时需要设置admin管理密码。admin也具有普通用户的所有功能。此外，admin可以在后台生成注册码，后续用户打开worker的网页可以通过用户名，密码，注册码（必须）进行注册。
 
 平台内可以生成api key，所有接口使用POST协议。
-①/setinformation？/{username}? 用途：固定信息分发功能
+①/setinformation？ 用途：固定信息分发功能
 需要：“user_name”、“api_key”、“key”、“value” 返回：“status”（正常为200）
 用户也可以直接在网站后台“发布信息“图形化操作（此时无需api key）。
 
@@ -38,3 +38,12 @@
 安全：修改密码、添加（要求用户输入名称，生成一个api_key）、删除api_key、（有一个列表展示api_key的名称和api_key，api_key默认隐藏，可以点击眼睛图标查看）
 发布信息：可以手动发布信息，设置“key”和“value”，也可以删除信息
 获取反馈：有一个开关，表示是否开关反馈。下面显示一个列表，展示当前收到的反馈清单。
+
+2026/11/12
+给用户页的侧栏最下方添加文档选项，可以参考大厂的文档界面，指导用户使用api
+给用户页的侧栏发布信息下面添加文件存储功能，admin可以限制每个已注册用户的可用空间，也可以设置新用户的默认注册空间
+/uploadfile?要能上传文件并返回文件存储链接
+/downloadfile?和/deletefile?也要能使用（对于download，每个文件可以单独设置是否要api_key才能下载）
+readme fix（删除add to cloudflare，指导用户如何在cloudflare worker添加github仓库即可）
+登录页底部注明项目地址
+所有api添加status

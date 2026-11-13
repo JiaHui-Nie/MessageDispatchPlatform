@@ -1,7 +1,7 @@
 import { DecryptionError, ApiError, badRequest } from './errors.ts';
 
 export type Params = Record<string, string>;
-export type HttpMethod = 'GET' | 'POST';
+export type HttpMethod = 'GET' | 'POST' | 'HEAD';
 
 const BASE_HEADERS: Record<string, string> = {
   'content-type': 'application/json; charset=utf-8',
@@ -49,16 +49,21 @@ export function errorResponse(error: unknown): Response {
   return jsonResponse({ status: 500, error: 'internal_error', message: '服务器内部错误，请稍后重试' }, 500);
 }
 
+/** 只读取查询字符串，用于需要自行解析请求体（如文件上传）的接口。 */
+export function queryParams(request: Request): Params {
+  const params: Params = {};
+  new URL(request.url).searchParams.forEach((value, key) => {
+    params[key] = value;
+  });
+  return params;
+}
+
 /**
  * 读取参数：查询字符串 + JSON 请求体 + 表单请求体。
  * 平台接口按要求统一使用 POST，但保留查询字符串以兼容 curl 式调用。
  */
 export async function readParams(request: Request): Promise<Params> {
-  const params: Params = {};
-  const url = new URL(request.url);
-  url.searchParams.forEach((value, key) => {
-    params[key] = value;
-  });
+  const params = queryParams(request);
 
   if (request.method !== 'POST') {
     return params;

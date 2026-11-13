@@ -2,6 +2,8 @@
    信息分发平台 — 前端（无构建步骤的原生 ES Module）
    ========================================================================== */
 
+import { renderDocs } from './docs.js';
+
 const appEl = document.getElementById('app');
 const modalRoot = document.getElementById('modal-root');
 const toastEl = document.getElementById('toast');
@@ -16,6 +18,9 @@ const state = {
   timezone: 'Asia/Shanghai',
   notice: '',
 };
+
+const PROJECT_URL = 'https://github.com/JiaHui-Nie/MessageDispatchPlatform';
+const PROJECT_FOOTER = `<p class="auth-project">开源项目：<a href="${PROJECT_URL}" target="_blank" rel="noopener noreferrer">JiaHui-Nie/MessageDispatchPlatform</a></p>`;
 
 /* ------------------------------ 基础工具 ------------------------------ */
 
@@ -32,6 +37,19 @@ function initials(user) {
 
 function formatNumber(value) {
   return new Intl.NumberFormat('zh-CN').format(Number(value) || 0);
+}
+
+function formatBytes(value) {
+  const bytes = Number(value) || 0;
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = bytes / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size >= 100 ? Math.round(size) : Math.round(size * 10) / 10} ${units[index]}`;
 }
 
 const ICONS = {
@@ -62,6 +80,12 @@ const ICONS = {
   ticket: '<path d="M2 9a3 3 0 0 1 0 6v3a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-3a3 3 0 0 1 0-6V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2Z"/><path d="M13 5v2"/><path d="M13 17v2"/><path d="M13 11v2"/>',
   chart: '<path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/>',
   sparkles: '<path d="m12 3 1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9Z"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9Z"/>',
+  book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2Z"/>',
+  folder: '<path d="M4 20a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2Z"/>',
+  upload: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 9 5-5 5 5"/><path d="M12 4v12"/>',
+  download: '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 11 5 5 5-5"/><path d="M12 16V4"/>',
+  hardDrive: '<path d="M22 12H2"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11Z"/><path d="M6 16h.01"/><path d="M10 16h.01"/>',
+  file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/>',
 };
 
 function icon(name, className = '') {
@@ -71,13 +95,16 @@ function icon(name, className = '') {
 /* ------------------------------ API 封装 ------------------------------ */
 
 async function api(path, body = {}, options = {}) {
+  const isForm = typeof FormData !== 'undefined' && body instanceof FormData;
   let response;
   try {
     response = await fetch(path, {
       method: 'POST',
       credentials: 'same-origin',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
-      body: JSON.stringify(body ?? {}),
+      headers: isForm
+        ? { accept: 'application/json' }
+        : { 'content-type': 'application/json', accept: 'application/json' },
+      body: isForm ? body : JSON.stringify(body ?? {}),
     });
   } catch {
     throw new Error('网络请求失败，请检查网络连接后重试');
@@ -309,10 +336,12 @@ const NAV_ITEMS = [
   { key: 'overview', href: '#/overview', label: '总览', icon: 'grid' },
   { key: 'security', href: '#/security', label: '安全', icon: 'shield' },
   { key: 'publish', href: '#/publish', label: '发布信息', icon: 'send' },
+  { key: 'files', href: '#/files', label: '文件存储', icon: 'folder' },
   { key: 'feedback', href: '#/feedback', label: '获取反馈', icon: 'message', badge: true },
 ];
 
 const ADMIN_NAV = { key: 'admin', href: '#/admin', label: '管理后台', icon: 'users' };
+const DOCS_NAV = { key: 'docs', href: '#/docs', label: 'API 文档', icon: 'book' };
 
 function navigate(hash) {
   if (location.hash === hash) {
@@ -400,6 +429,7 @@ function renderLogin() {
         </form>
         <p class="auth-foot">还没有账号？<a href="#/register">使用注册码注册</a></p>
         <p class="auth-note">首次部署的管理员账号固定为 <strong>admin</strong>，请先在初始化页面设置密码。</p>
+        ${PROJECT_FOOTER}
       </div>
     </div>`;
 
@@ -449,6 +479,7 @@ function renderSetup() {
           <div class="alert alert-error" data-error hidden></div>
           <button class="btn btn-primary btn-block" type="submit">创建管理员并进入后台</button>
         </form>
+        ${PROJECT_FOOTER}
       </div>
     </div>`;
 
@@ -496,6 +527,7 @@ function renderRegister() {
           <button class="btn btn-primary btn-block" type="submit">注册并登录</button>
         </form>
         <p class="auth-foot">已有账号？<a href="#/login">返回登录</a></p>
+        ${PROJECT_FOOTER}
       </div>
     </div>`;
 
@@ -520,7 +552,10 @@ function renderRegister() {
 
 function renderShell(viewKey, options = {}) {
   const user = state.user;
-  const navHtml = [...NAV_ITEMS, ...(user?.role === 'admin' ? [ADMIN_NAV] : [])]
+  const navHtml = [
+    ...NAV_ITEMS,
+    ...(user?.role === 'admin' ? [ADMIN_NAV] : []),
+  ]
     .map(
       (item) => `
       <a class="nav-item ${item.key === viewKey ? 'is-active' : ''}" href="${item.href}">
@@ -530,6 +565,11 @@ function renderShell(viewKey, options = {}) {
       </a>`,
     )
     .join('');
+  const docsHtml = `
+      <a class="nav-item nav-docs ${viewKey === DOCS_NAV.key ? 'is-active' : ''}" href="${DOCS_NAV.href}">
+        ${icon(DOCS_NAV.icon)}
+        <span>${DOCS_NAV.label}</span>
+      </a>`;
 
   appEl.className = '';
   appEl.innerHTML = `
@@ -542,7 +582,7 @@ function renderShell(viewKey, options = {}) {
             <small>信息分发 · 反馈回复</small>
           </div>
         </div>
-        <nav class="nav" aria-label="主导航">${navHtml}</nav>
+        <nav class="nav" aria-label="主导航">${navHtml}${docsHtml}</nav>
         <div class="sidebar-footer">
           <div class="user-chip">
             <div class="avatar">${esc(initials(user))}</div>
@@ -651,6 +691,7 @@ VIEWS.overview = {
         </div>
         <div class="page-actions">
           <a class="btn btn-secondary" href="#/publish">${icon('send')}发布信息</a>
+          <a class="btn btn-secondary" href="#/files">${icon('folder')}文件存储</a>
           <a class="btn btn-primary" href="#/feedback">${icon('message')}查看反馈</a>
         </div>
       </header>
@@ -671,6 +712,10 @@ VIEWS.overview = {
         <div class="stat-card">
           <div class="stat-label">${icon('key')}API Key</div>
           <div class="stat-value">${formatNumber(data.stats.api_keys)}<small>个</small></div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">${icon('hardDrive')}存储空间</div>
+          <div class="stat-value">${formatBytes(data.storage?.used ?? 0)}<small>/ ${formatBytes(data.storage?.quota ?? 0)}</small></div>
         </div>
       </section>
 
@@ -893,7 +938,9 @@ VIEWS.publish = {
           formTitle.textContent = '编辑信息';
           resetButton.hidden = false;
           editingKey = item.key;
-          form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          if (typeof form.scrollIntoView === 'function') {
+            form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
           form.elements.namedItem('value').focus();
           return;
         }
@@ -920,6 +967,241 @@ VIEWS.publish = {
             await api('/api/deleteinformation', { key: item.key });
             toast('已删除', 'success');
             VIEWS.publish.render(el);
+          } catch (error) {
+            toast(error.message, 'error');
+          }
+        }
+      });
+    });
+  },
+};
+
+/* ------------------------------ 文件存储 ------------------------------ */
+
+VIEWS.files = {
+  title: '文件存储',
+  async render(el) {
+    el.innerHTML = `<div class="skeleton skeleton-title"></div><div class="skeleton"></div>`;
+    let data;
+    try {
+      data = await api('/api/files/list');
+    } catch (error) {
+      renderErrorCard(el, error, () => VIEWS.files.render(el));
+      return;
+    }
+
+    const files = data.files ?? [];
+    const storage = data.storage ?? { quota: 0, used: 0, remaining: 0, percent: 0, file_count: 0 };
+    const maxBytes = data.limits?.max_file_size ?? 10 * 1024 * 1024;
+    const maxMb = Math.round(maxBytes / (1024 * 1024));
+    const quotaLevel = storage.percent >= 90 ? 'danger' : storage.percent >= 70 ? 'warning' : '';
+
+    const rows = files
+      .map(
+        (file, index) => `
+        <tr>
+          <td>
+            <div class="file-name">${icon('file')}<span>${esc(file.name)}</span></div>
+            <div class="file-meta">${esc(file.content_type)} · ${formatBytes(file.size)}</div>
+          </td>
+          <td>${
+            file.private
+              ? '<span class="badge badge-warning"><span class="dot"></span>私有</span>'
+              : '<span class="badge badge-primary"><span class="dot"></span>公开</span>'
+          }</td>
+          <td class="nowrap cell-muted">${formatNumber(file.downloads)} 次</td>
+          <td class="nowrap cell-muted">${esc(file.created_at_display)}</td>
+          <td>
+            <div class="cell-actions">
+              <a class="icon-btn" href="${esc(file.url_path)}" target="_blank" rel="noopener noreferrer" title="下载" aria-label="下载">${icon('download')}</a>
+              <button class="icon-btn" type="button" data-action="copy" data-index="${index}" title="复制链接" aria-label="复制链接">${icon('copy')}</button>
+              <button class="icon-btn" type="button" data-action="toggle" data-index="${index}" title="${file.private ? '设为公开' : '设为私有'}" aria-label="切换可见性">${icon(file.private ? 'link' : 'lock')}</button>
+              <button class="icon-btn danger" type="button" data-action="delete" data-index="${index}" title="删除" aria-label="删除">${icon('trash')}</button>
+            </div>
+          </td>
+        </tr>`,
+      )
+      .join('');
+
+    el.innerHTML = `
+      <header class="page-header">
+        <div>
+          <h1 class="page-title">文件存储</h1>
+          <p class="page-subtitle">上传文件并生成下载链接；文件加密存储，每个文件可单独设置是否需要 API Key。</p>
+        </div>
+        <div class="page-actions">
+          <span class="badge">${icon('hardDrive')}单文件 ≤ ${maxMb} MB</span>
+        </div>
+      </header>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">${icon('chart')}空间用量</h2>
+            <p class="card-subtitle">${formatBytes(storage.used)} / ${formatBytes(storage.quota)} · ${formatNumber(storage.file_count)} 个文件</p>
+          </div>
+          <span class="badge ${quotaLevel === 'danger' ? 'badge-danger' : quotaLevel === 'warning' ? 'badge-warning' : 'badge-primary'}">${storage.percent}%</span>
+        </div>
+        <div class="card-body">
+          <progress class="quota-bar ${quotaLevel}" value="${storage.used}" max="${storage.quota || 1}"></progress>
+          <div class="dropzone" data-dropzone role="button" tabindex="0" aria-label="上传文件">
+            ${icon('upload')}
+            <strong>点击选择文件，或拖拽到这里上传</strong>
+            <span>文件会以 AES-256-GCM 加密后存入 D1，单个文件最大 ${maxMb} MB</span>
+            <input type="file" multiple data-file-input hidden />
+          </div>
+          <label class="checkbox mt-3">
+            <input type="checkbox" data-private-upload />
+            <div>
+              <strong>需要 API Key 才能下载</strong>
+              <small>上传后可在列表中随时切换公开/私有。</small>
+            </div>
+          </label>
+          <div class="alert alert-error mt-3" data-upload-error hidden></div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2 class="card-title">${icon('folder')}文件列表</h2>
+            <p class="card-subtitle">共 ${formatNumber(files.length)} 个文件</p>
+          </div>
+          <button class="btn btn-secondary btn-sm" type="button" data-refresh>${icon('refresh')}刷新</button>
+        </div>
+        <div class="card-body tight">
+          ${
+            files.length
+              ? `<div class="table-wrap"><table>
+                   <thead><tr><th>文件</th><th>可见性</th><th class="nowrap">下载</th><th class="nowrap">上传时间</th><th class="nowrap"></th></tr></thead>
+                   <tbody>${rows}</tbody>
+                 </table></div>`
+              : emptyState('还没有上传文件', '点击上方区域上传第一个文件，上传后会得到下载链接。', 'folder')
+          }
+        </div>
+      </section>`;
+
+    const zone = el.querySelector('[data-dropzone]');
+    const input = el.querySelector('[data-file-input]');
+    const errorBox = el.querySelector('[data-upload-error]');
+    const privateUpload = el.querySelector('[data-private-upload]');
+    let uploading = false;
+
+    const uploadFiles = async (fileList) => {
+      if (uploading) return;
+      const queue = Array.from(fileList ?? []);
+      if (queue.length === 0) return;
+      uploading = true;
+      zone.classList.add('is-uploading');
+      hideError(errorBox);
+      const results = [];
+      for (const file of queue) {
+        if (file.size > maxBytes) {
+          showError(errorBox, `${file.name} 超过 ${maxMb} MB 限制`);
+          continue;
+        }
+        const form = new FormData();
+        form.append('file', file);
+        if (privateUpload.checked) {
+          form.append('private', 'true');
+        }
+        try {
+          results.push(await api('/api/uploadfile', form));
+        } catch (error) {
+          showError(errorBox, `${file.name}：${error.message}`);
+        }
+      }
+      uploading = false;
+      zone.classList.remove('is-uploading');
+      if (input) input.value = '';
+      if (results.length === 0) {
+        return;
+      }
+      openModal({
+        title: `上传成功（${results.length} 个文件）`,
+        subtitle: '复制链接即可分享；私有文件下载时需要提供你的 API Key',
+        body: results
+          .map(
+            (result) => `
+            <div class="modal-section">
+              <div class="row-between">
+                <strong class="truncate">${esc(result.name)}</strong>
+                <span class="badge">${formatBytes(result.size)}</span>
+              </div>
+              <div class="copy-box mt-2">
+                <code>${esc(result.download_url)}</code>
+                <button class="icon-btn" type="button" data-copy="${esc(result.download_url)}" aria-label="复制链接">${icon('copy')}</button>
+              </div>
+              ${result.private ? '<p class="field-hint mt-2">私有文件：下载时需附带 <code>api_key</code> 或使用 <code>X-API-Key</code> 请求头。</p>' : ''}
+            </div>`,
+          )
+          .join(''),
+        footer: '<button class="btn btn-primary" type="button" data-close>完成</button>',
+        onClose: () => VIEWS.files.render(el),
+      });
+    };
+
+    zone.addEventListener('click', (event) => {
+      if (event.target === input) return;
+      input.click();
+    });
+    zone.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        input.click();
+      }
+    });
+    input.addEventListener('change', () => uploadFiles(input.files));
+    for (const type of ['dragenter', 'dragover']) {
+      zone.addEventListener(type, (event) => {
+        event.preventDefault();
+        zone.classList.add('is-dragover');
+      });
+    }
+    for (const type of ['dragleave', 'drop']) {
+      zone.addEventListener(type, (event) => {
+        event.preventDefault();
+        zone.classList.remove('is-dragover');
+      });
+    }
+    zone.addEventListener('drop', (event) => uploadFiles(event.dataTransfer?.files));
+
+    el.querySelector('[data-refresh]')?.addEventListener('click', () => VIEWS.files.render(el));
+
+    el.querySelectorAll('[data-action]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const file = files[Number(button.dataset.index)];
+        if (!file) return;
+        const action = button.dataset.action;
+        const link = `${location.origin}${file.url_path}`;
+        if (action === 'copy') {
+          await copyText(link);
+          if (file.private) {
+            toast('链接已复制；私有文件下载时需附带 API Key', 'success');
+          }
+          return;
+        }
+        if (action === 'toggle') {
+          try {
+            await api('/api/files/visibility', { id: file.id, private: !file.private });
+            toast(file.private ? '已设为公开' : '已设为私有', 'success');
+            VIEWS.files.render(el);
+          } catch (error) {
+            toast(error.message, 'error');
+          }
+          return;
+        }
+        if (action === 'delete') {
+          const confirmed = await confirmAction({
+            title: '删除文件',
+            message: `确定删除「${file.name}」吗？删除后下载链接会立即失效，并释放 ${formatBytes(file.size)} 空间。`,
+            confirmText: '删除',
+          });
+          if (!confirmed) return;
+          try {
+            await api('/api/files/delete', { id: file.id });
+            toast('文件已删除', 'success');
+            VIEWS.files.render(el);
           } catch (error) {
             toast(error.message, 'error');
           }
@@ -1459,10 +1741,17 @@ VIEWS.admin = {
           <td class="nowrap">${formatNumber(user.info_count)}</td>
           <td class="nowrap">${formatNumber(user.feedback_count)}</td>
           <td class="nowrap">${formatNumber(user.api_key_count)}</td>
+          <td class="nowrap">
+            <div class="storage-cell">
+              <span>${formatBytes(user.storage_used)} / ${formatBytes(user.storage_quota)}</span>
+              <progress class="quota-bar small" value="${user.storage_used}" max="${user.storage_quota || 1}"></progress>
+            </div>
+          </td>
           <td class="nowrap cell-muted">${esc(user.created_at_display)}</td>
           <td class="nowrap cell-muted">${user.last_login_at ? esc(user.last_login_at.slice(0, 16).replace('T', ' ')) : '—'}</td>
           <td>
             <div class="cell-actions">
+              <button class="icon-btn" type="button" data-quota="${user.id}" data-username="${esc(user.username)}" data-quota-mb="${Math.round((user.storage_quota || 0) / (1024 * 1024))}" aria-label="调整存储空间" title="调整存储空间">${icon('hardDrive')}</button>
               <button class="icon-btn" type="button" data-reset="${user.id}" data-username="${esc(user.username)}" aria-label="重置密码" title="重置密码">${icon('key')}</button>
               ${
                 user.id === state.user.id
@@ -1512,6 +1801,14 @@ VIEWS.admin = {
           <div class="stat-label">${icon('ticket')}有效注册码</div>
           <div class="stat-value">${formatNumber(stats.active_codes)}</div>
         </div>
+        <div class="stat-card">
+          <div class="stat-label">${icon('folder')}文件</div>
+          <div class="stat-value">${formatNumber(stats.files)}</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">${icon('hardDrive')}存储用量</div>
+          <div class="stat-value">${formatBytes(stats.storage_used)}</div>
+        </div>
       </section>
 
       <section class="card">
@@ -1560,13 +1857,38 @@ VIEWS.admin = {
       <section class="card">
         <div class="card-header">
           <div>
+            <h2 class="card-title">${icon('hardDrive')}文件存储</h2>
+            <p class="card-subtitle">默认空间只影响之后新注册的用户；已有用户请在下方单独调整</p>
+          </div>
+          <span class="badge">${formatNumber(stats.files)} 个文件 · ${formatBytes(stats.storage_used)}</span>
+        </div>
+        <div class="card-body">
+          <form class="form" id="storage-form" novalidate>
+            <div class="form-row">
+              <label class="field">
+                <span>新用户默认空间（MB）</span>
+                <input class="input" name="default_quota_mb" type="number" min="0" max="10240" value="${Math.round(stats.default_storage_quota / (1024 * 1024))}" />
+                <small class="field-hint">0 表示新用户不能上传文件；修改后不影响已注册用户。</small>
+              </label>
+            </div>
+            <div class="alert alert-error" data-error hidden></div>
+            <div class="page-actions">
+              <button class="btn btn-primary" type="submit">保存默认空间</button>
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
             <h2 class="card-title">${icon('users')}用户</h2>
             <p class="card-subtitle">共 ${formatNumber(users.length)} 个账号</p>
           </div>
         </div>
         <div class="card-body tight">
           <div class="table-wrap"><table>
-            <thead><tr><th>用户</th><th>角色</th><th class="nowrap">信息</th><th class="nowrap">反馈</th><th class="nowrap">API Key</th><th class="nowrap">注册时间</th><th class="nowrap">最近登录</th><th></th></tr></thead>
+            <thead><tr><th>用户</th><th>角色</th><th class="nowrap">信息</th><th class="nowrap">反馈</th><th class="nowrap">API Key</th><th class="nowrap">存储</th><th class="nowrap">注册时间</th><th class="nowrap">最近登录</th><th></th></tr></thead>
             <tbody>${userRows}</tbody>
           </table></div>
         </div>
@@ -1593,6 +1915,13 @@ VIEWS.admin = {
       }
     });
 
+    onSubmit(el.querySelector('#storage-form'), async () => {
+      const values = formValues(el.querySelector('#storage-form'));
+      await api('/api/admin/storage', { default_quota_mb: Number(values.default_quota_mb || 0) });
+      toast('默认存储空间已更新', 'success');
+      VIEWS.admin.render(el);
+    });
+
     el.querySelectorAll('[data-revoke]').forEach((button) => {
       button.addEventListener('click', async () => {
         const confirmed = await confirmAction({
@@ -1608,6 +1937,17 @@ VIEWS.admin = {
         } catch (error) {
           toast(error.message, 'error');
         }
+      });
+    });
+
+    el.querySelectorAll('[data-quota]').forEach((button) => {
+      button.addEventListener('click', () => {
+        openUserStorage(
+          Number(button.dataset.quota),
+          button.dataset.username,
+          Number(button.dataset.quotaMb),
+          () => VIEWS.admin.render(el),
+        );
       });
     });
 
@@ -1675,6 +2015,81 @@ function openResetPassword(userId, username, onDone) {
     }
   });
 }
+
+function openUserStorage(userId, username, quotaMb, onDone) {
+  const modal = openModal({
+    title: '调整存储空间',
+    subtitle: `用户 @${esc(username)}`,
+    body: `
+      <form class="form" id="quota-form" novalidate>
+        <label class="field">
+          <span>可用空间（MB）</span>
+          <input class="input" name="quota_mb" type="number" min="0" max="10240" value="${quotaMb}" required autofocus />
+          <small class="field-hint">0 表示禁止该用户上传文件；调低配额不会删除已有文件，但会阻止继续上传。</small>
+        </label>
+        <div class="alert alert-error" data-error hidden></div>
+      </form>`,
+    footer: `<button class="btn btn-secondary" type="button" data-close>取消</button>
+             <button class="btn btn-primary" type="button" id="quota-submit">保存</button>`,
+  });
+
+  modal.el.querySelector('#quota-submit').addEventListener('click', async () => {
+    const form = modal.el.querySelector('#quota-form');
+    const values = formValues(form);
+    const button = modal.el.querySelector('#quota-submit');
+    if (values.quota_mb === '' || Number.isNaN(Number(values.quota_mb))) {
+      showError(form.querySelector('[data-error]'), '请输入有效的空间大小');
+      return;
+    }
+    setBusy(button, true);
+    try {
+      await api('/api/admin/users/storage', { id: userId, quota_mb: Number(values.quota_mb) });
+      modal.close();
+      toast('存储空间已更新', 'success');
+      onDone?.();
+    } catch (error) {
+      showError(form.querySelector('[data-error]'), error.message);
+    } finally {
+      setBusy(button, false);
+    }
+  });
+}
+
+/* ------------------------------ API 文档 ------------------------------ */
+
+VIEWS.docs = {
+  title: 'API 文档',
+  async render(el) {
+    el.innerHTML = renderDocs(location.origin);
+    const buttons = Array.from(el.querySelectorAll('[data-doc]'));
+    const activate = (key) => {
+      buttons.forEach((button) => button.classList.toggle('is-active', button.dataset.doc === key));
+    };
+    buttons.forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = el.querySelector(`#docs-${button.dataset.doc}`);
+        if (target && typeof target.scrollIntoView === 'function') {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+        activate(button.dataset.doc);
+      });
+    });
+    activate('quickstart');
+
+    if ('IntersectionObserver' in window) {
+      const observer = new IntersectionObserver(
+        (entries) => {
+          const visible = entries
+            .filter((entry) => entry.isIntersecting)
+            .sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+          if (visible?.target?.id) activate(visible.target.id.replace('docs-', ''));
+        },
+        { rootMargin: '-90px 0px -65% 0px', threshold: 0 },
+      );
+      el.querySelectorAll('.docs-section').forEach((section) => observer.observe(section));
+    }
+  },
+};
 
 /* ------------------------------ 公开反馈页 ------------------------------ */
 
@@ -1940,6 +2355,13 @@ async function boot() {
       event.preventDefault();
       const value = copyButton.getAttribute('data-copy');
       if (value) copyText(value);
+      return;
+    }
+    const codeButton = target.closest('[data-copy-code]');
+    if (codeButton) {
+      event.preventDefault();
+      const code = codeButton.closest('.code-block')?.querySelector('code')?.textContent ?? '';
+      if (code) copyText(code);
     }
   });
 

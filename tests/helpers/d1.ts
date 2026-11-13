@@ -5,12 +5,16 @@
 import { DatabaseSync } from 'node:sqlite';
 
 type Row = Record<string, unknown>;
+type BindValue = string | number | Uint8Array | null;
 
-function normalize(value: unknown): string | number | null {
+function normalize(value: unknown): BindValue {
   if (value === undefined || value === null) return null;
   if (typeof value === 'boolean') return value ? 1 : 0;
   if (typeof value === 'bigint') return Number(value);
   if (typeof value === 'number' || typeof value === 'string') return value;
+  if (value instanceof Uint8Array) return value;
+  if (value instanceof ArrayBuffer) return new Uint8Array(value);
+  if (ArrayBuffer.isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   if (value instanceof Date) return value.toISOString();
   return String(value);
 }
@@ -28,9 +32,9 @@ function meta(changes = 0, lastRowId = 0, rowsRead = 0) {
 export class ShimStatement {
   private readonly db: DatabaseSync;
   readonly sql: string;
-  private readonly params: Array<string | number | null>;
+  private readonly params: BindValue[];
 
-  constructor(db: DatabaseSync, sql: string, params: Array<string | number | null> = []) {
+  constructor(db: DatabaseSync, sql: string, params: BindValue[] = []) {
     this.db = db;
     this.sql = sql;
     this.params = params;

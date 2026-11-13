@@ -4,10 +4,9 @@
 
 界面为现代化扁平化设计，原生 HTML/CSS/JS，无构建步骤；所有数据存于 D1，敏感字段使用 `JWT_SECRET` 派生的密钥进行 AES-256-GCM 加密。
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/JiaHui-Nie/MessageDispatchPlatform)
 [![CI](https://github.com/JiaHui-Nie/MessageDispatchPlatform/actions/workflows/ci.yml/badge.svg)](https://github.com/JiaHui-Nie/MessageDispatchPlatform/actions/workflows/ci.yml)
 
-> 点击按钮即可用本仓库一键部署；如果你 Fork 了本项目，请把按钮链接中的仓库地址替换为你 Fork 后的地址。
+> 开源仓库：[JiaHui-Nie/MessageDispatchPlatform](https://github.com/JiaHui-Nie/MessageDispatchPlatform)。部署方式见 [通过 GitHub 连接 Cloudflare Workers](#通过-github-连接-cloudflare-workersworkers-builds)。
 
 ---
 
@@ -15,7 +14,7 @@
 
 - [功能特性](#功能特性)
 - [架构](#架构)
-- [一键部署（推荐）](#一键部署推荐)
+- [通过 GitHub 连接 Cloudflare Workers](#通过-github-连接-cloudflare-workersworkers-builds)
 - [手动部署（CLI）](#手动部署cli)
 - [本地开发](#本地开发)
 - [界面说明](#界面说明)
@@ -35,11 +34,13 @@
 
 - **固定信息分发**：按 `key` 读写信息，公开信息可直接读取，私有信息需要 API Key。
 - **反馈对话**：访客无需注册即可提交反馈，拿到 `session_id` 后可持续追加消息；接收者在后台回复，支持未读/已读、筛选、删除。
+- **文件存储**：上传文件获得下载链接，内容加密后分块存入 D1；每个文件可单独设为公开或需要 API Key，管理员可限制每个用户的可用空间与新用户默认空间。
+- **在线 API 文档**：侧栏底部内置文档页，按接口分类展示参数、curl 示例、错误码与限制。
 - **多用户 + 注册码**：管理员生成一次性/限次注册码，用户凭码注册；管理员拥有普通用户的全部能力。
 - **API Key 管理**：每个账号最多 20 个 Key，名称备注、默认隐藏、可显示/复制/删除，Key 在数据库中只保存哈希与密文。
-- **安全加固**：JWT 会话、PBKDF2 密码哈希、AES-256-GCM 字段级加密、CSRF 同源校验、D1 限流、密码强度校验、登录态失效控制。
-- **一键部署友好**：`wrangler deploy` 自动创建 D1；首次请求自动建表，部署后只需补一个 `JWT_SECRET` 就能用。
-- **现代化响应式界面**：总览、安全、发布信息、获取反馈、管理后台、公开反馈页；自动适配深色模式与移动端。
+- **安全加固**：JWT 会话、PBKDF2 密码哈希、AES-256-GCM 字段级与文件加密、CSRF 同源校验、D1 限流、密码强度校验、登录态失效控制。
+- **部署友好**：首次请求自动建表；在 Cloudflare 控制台连接 GitHub 仓库即可持续部署。
+- **现代化响应式界面**：总览、安全、发布信息、文件存储、获取反馈、管理后台、API 文档、公开反馈页；自动适配深色模式与移动端。
 
 ## 架构
 
@@ -51,30 +52,45 @@
 ```
 
 - 运行时：Cloudflare Workers（ES Module Worker，TypeScript）
-- 数据库：D1（通过 `DB` binding）
-- 前端：原生 ES Module SPA（`public/app.js`），hash 路由，无需打包
+- 数据库：D1（通过 `DB` binding）；文件内容加密后按 900 KB 分块存入 `file_chunks`
+- 前端：原生 ES Module SPA（`public/app.js` + `public/docs.js`），hash 路由，无需打包
 - 密码学：WebCrypto（HKDF / AES-GCM / PBKDF2 / HMAC）
 
-## 一键部署（推荐）
+## 通过 GitHub 连接 Cloudflare Workers（Workers Builds）
 
-1. 点击顶部 **Deploy to Cloudflare** 按钮（如果使用 Fork，请确认按钮指向你自己的仓库）。
-2. Cloudflare 会请求 GitHub 授权，选择仓库后创建 Worker，并自动创建/绑定名为 `message-dispatch-platform` 的 D1 数据库。
-3. 部署完成后，在 **Worker → Settings → Variables and Secrets** 中添加一个 **Secret**：
+推荐使用 Cloudflare 控制台的 Git 集成：仓库推送后自动构建部署，无需在本地执行 wrangler。
 
-   | 名称 | 值 |
-   | --- | --- |
-   | `JWT_SECRET` | 一段至少 32 位的高强度随机字符串（生成方式见下） |
+1. **创建 D1 数据库**（首次部署需要）
+   - 控制台：**Storage & Databases → D1 SQL Database → Create database**，名称填 `message-dispatch-platform`。
+   - 或命令行：`pnpm db:create`，把返回的 `database_id` 填进 `wrangler.jsonc`（不填时 `wrangler deploy` 会自动创建）。
 
-   ```bash
-   node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
-   ```
+2. **连接 GitHub 仓库**
+   - 进入 **Workers & Pages → Create → Workers → Import a repository**（部分界面显示为 *Connect to Git*），授权 GitHub 后选择本仓库。
+   - 项目名称必须是 `messagedispatchplatform`，与 `wrangler.jsonc` 中的 `name` 保持一致（否则 Workers Builds 会提示名称不匹配并覆盖配置）。
+   - 构建命令留空或填 `pnpm install`；部署命令填 `pnpm exec wrangler deploy`（使用 npm 时为 `npx wrangler deploy`）。
 
-4. 打开 `https://<你的-worker>.workers.dev`，首次访问会要求为 `admin` 设置密码，完成后即可使用。
-5. （可选）在 **Worker → Settings → Domains & Routes** 绑定自定义域名。
+3. **添加运行时密钥**
+   - 在 **Worker → Settings → Variables and Secrets** 中添加 **Secret**：
 
-> 如果忘记设置 `JWT_SECRET`，页面会显示明确的配置提示，而不会以不安全的方式启动。
+     | 名称 | 值 |
+     | --- | --- |
+     | `JWT_SECRET` | 至少 32 位的高强度随机字符串（生成方式见下） |
+
+     ```bash
+     node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+     ```
+
+   - 注意：要加在 Worker 的「运行时变量和机密」中，而不是 Workers Builds 的「构建变量」里。
+
+4. **部署并初始化**
+   - 保存后 Cloudflare 会触发构建部署；打开 `https://messagedispatchplatform.<你的子域>.workers.dev`，首次访问会要求为 `admin` 设置密码。
+   - 也可以用 `/api/health` 自检：`secret_configured: true`、`database: "ok"`、`schema_version: 2`。
+
+5. （可选）在 **Settings → Domains & Routes** 绑定自定义域名。
+
+> 首次请求会自动建表；也可以手动执行 `pnpm db:migrate:remote`。
 >
-> 首次请求会自动建表；也可以手动执行 `pnpm db:migrate:remote`（见下一节）。
+> 如果忘记设置 `JWT_SECRET`，页面会显示明确的配置提示，而不会以不安全的方式启动。
 
 ## 手动部署（CLI）
 
@@ -148,11 +164,13 @@ pnpm db:migrate:local
 | 初始化 | 自动 | 首次部署设置 `admin` 密码（仅一次） |
 | 登录 | `#/login` | 用户名、密码、注册入口 |
 | 注册 | `#/register` | 用户名、密码、注册码（必填） |
-| 总览 | `#/overview` | 统计卡片、最近反馈、反馈公开链接、API 基地址 |
+| 总览 | `#/overview` | 统计卡片、存储用量、最近反馈、反馈公开链接、API 基地址 |
 | 安全 | `#/security` | 修改密码、创建/查看/复制/删除 API Key |
 | 发布信息 | `#/publish` | 发布、编辑、删除 `key/value`，切换公开/私有 |
+| 文件存储 | `#/files` | 上传/下载/删除文件，复制链接，切换公开/私有，查看配额 |
 | 获取反馈 | `#/feedback` | 反馈开关、公开页说明、未读/已读筛选、对话式回复 |
-| 管理后台 | `#/admin` | 平台统计、注册码生成/吊销、用户列表/重置密码/删除 |
+| 管理后台 | `#/admin` | 平台统计、注册码、用户管理、默认/单用户存储配额 |
+| API 文档 | `#/docs` | 内置接口文档：认证、参数、curl 示例、错误码与限制 |
 | 公开反馈页 | `#/f/<用户名>` | 任何人可访问，无需登录；提交后显示 `session_id` 并支持继续对话 |
 
 管理员账号拥有普通用户的全部功能，另外多出「管理后台」入口。
@@ -162,13 +180,15 @@ pnpm db:migrate:local
 ### 约定
 
 - 基地址：`https://<你的-worker>.workers.dev`
-- **所有平台接口都使用 `POST`**（只有 `GET /api/health` 是健康检查）。
-- 请求体为 JSON：`Content-Type: application/json`；也兼容查询字符串与 `application/x-www-form-urlencoded`，方便 curl / 脚本调用。
+- **所有平台接口都使用 `POST`**（`GET /api/health` 与文件下载 `GET /api/downloadfile` 例外）。
+- 请求体为 JSON：`Content-Type: application/json`；也兼容查询字符串与 `application/x-www-form-urlencoded`，方便 curl / 脚本调用。文件上传使用 `multipart/form-data` 或原始二进制。
 - 成功响应统一包含 `"status": 200`；出错时 HTTP 状态码与 `status` 一致，并带 `error`、`message`：
 
   ```json
   { "status": 400, "error": "invalid_key", "message": "key 只能包含字母、数字、下划线、点、冒号和短横线……" }
   ```
+
+  文件下载返回二进制，无法在 JSON 中带 `status`，因此通过响应头 `X-API-Status: 200` 表示成功。
 
 - 鉴权方式：
   - **第三方脚本**：在参数中传 `api_key`（在「安全」页面创建）。
@@ -311,6 +331,86 @@ POST /api/deletefeedback
 
 删除会话会级联删除全部消息。
 
+#### ⑨ 上传文件
+
+```http
+POST /api/uploadfile
+```
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `file` | 是* | `multipart/form-data` 中的文件字段；原始二进制上传时省略 |
+| `user_name` | 否 | 文件所有者；只传 `api_key` 时可省略 |
+| `api_key` | 是* | 第三方调用使用；网页后台使用登录态 |
+| `private` | 否 | 是否需要 API Key 才能下载，默认 `false` |
+| `name` | 否 | 覆盖文件名（最多 180 字符） |
+
+支持两种请求方式：
+
+```bash
+# multipart
+curl -X POST "$BASE/api/uploadfile?api_key=$KEY" \
+  -F 'file=@./report.pdf' \
+  -F 'private=true'
+
+# 原始二进制（文件名放在请求头，非 ASCII 建议 URL 编码）
+curl -X POST "$BASE/api/uploadfile?api_key=$KEY" \
+  -H 'content-type: application/octet-stream' \
+  -H 'x-file-name: report.pdf' \
+  --data-binary '@./report.pdf'
+```
+
+```json
+{
+  "status": 200,
+  "file_id": "8b1f…（48 位十六进制）",
+  "name": "report.pdf",
+  "size": 20480,
+  "content_type": "application/pdf",
+  "private": true,
+  "url_path": "/api/downloadfile?id=8b1f…",
+  "download_url": "https://your-worker.workers.dev/api/downloadfile?id=8b1f…",
+  "storage": { "quota": 52428800, "used": 20480, "remaining": 52408320, "percent": 0.1, "file_count": 1 }
+}
+```
+
+文件内容以 AES-256-GCM 加密后按 900 KB 分块写入 D1；超出配额返回 `413 storage_quota_exceeded`，超出单文件上限返回 `413 file_too_large`。
+
+#### ⑩ 下载文件
+
+```http
+GET /api/downloadfile?id=<file_id>
+POST /api/downloadfile   { "id": "<file_id>" }
+```
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `id` | 是 | 上传时返回的 `file_id`（兼容 `file_id`） |
+| `api_key` | 否 | 私有文件需要；也可使用 `X-API-Key` 请求头 |
+
+公开文件可直接访问；私有文件需要所有者 API Key 或所有者登录态。响应为文件二进制：
+
+```http
+HTTP/1.1 200 OK
+content-type: application/pdf
+content-disposition: attachment; filename="report.pdf"; filename*=UTF-8''report.pdf
+x-api-status: 200
+```
+
+#### ⑪ 删除文件
+
+```http
+POST /api/deletefile
+```
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `file_id` | 是 | 文件 ID（兼容 `id`） |
+| `user_name` | 否 | 文件所有者；只传 `api_key` 时可省略 |
+| `api_key` | 是* | 或使用网页登录态 |
+
+删除后立即释放配额，下载链接失效。
+
 ### 网页后台接口（Cookie 会话）
 
 | 接口 | 参数 | 说明 |
@@ -335,19 +435,24 @@ POST /api/deletefeedback
 | `POST /api/feedback/delete` | `session_id` | 删除会话 |
 | `POST /api/feedback/settings` | `enabled`、`intro` | 开启/关闭反馈、设置公开页说明 |
 | `POST /api/public/profile` | `user_name` | 公开页资料（是否开放、显示名、说明） |
-| `POST /api/overview` | — | 总览统计与最近反馈 |
+| `POST /api/files/list` | — | 自己的文件列表、配额与上限 |
+| `POST /api/files/visibility` | `id`、`private` | 切换文件公开/私有 |
+| `POST /api/files/delete` | `id` | 删除自己的文件 |
+| `POST /api/overview` | — | 总览统计、存储用量与最近反馈 |
 
 ### 管理接口（需要 `admin` 角色）
 
 | 接口 | 参数 | 说明 |
 | --- | --- | --- |
-| `POST /api/admin/stats` | — | 用户/信息/反馈/注册码统计 |
+| `POST /api/admin/stats` | — | 用户/信息/反馈/文件/存储/注册码统计 |
 | `POST /api/admin/codes/create` | `label`、`max_uses`、`expires_in_days` | 生成注册码（明文只返回一次） |
 | `POST /api/admin/codes/list` | — | 注册码列表与状态 |
 | `POST /api/admin/codes/revoke` | `id` | 吊销注册码 |
-| `POST /api/admin/users/list` | — | 用户列表与数据计数 |
+| `POST /api/admin/storage` | `default_quota_mb` | 查看/设置新用户默认存储空间（只影响后续注册） |
+| `POST /api/admin/users/list` | — | 用户列表（含文件数与存储用量） |
+| `POST /api/admin/users/storage` | `id`、`quota_mb` | 调整指定用户的存储空间 |
 | `POST /api/admin/users/reset-password` | `id`、`new_password` | 重置任意用户密码 |
-| `POST /api/admin/users/delete` | `id` | 删除用户（级联删除其数据） |
+| `POST /api/admin/users/delete` | `id` | 删除用户（级联删除其数据与文件） |
 
 ### 健康检查
 
@@ -356,8 +461,8 @@ GET /api/health
 ```
 
 ```json
-{ "status": 200, "app": "信息分发平台", "version": "1.0.0", "secret_configured": true,
-  "database": "ok", "schema_version": 1, "needs_setup": false, "time": "2026-11-12T06:00:00.000Z" }
+{ "status": 200, "app": "信息分发平台", "version": "1.1.0", "secret_configured": true,
+  "database": "ok", "schema_version": 2, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
 ```
 
 未配置 `JWT_SECRET` 或数据库异常时返回 `503`，便于监控告警。
@@ -373,12 +478,14 @@ GET /api/health
 | 401 | `invalid_credentials` | 用户名或密码错误 |
 | 401 | `invalid_api_key` | API Key 无效 |
 | 403 | `feedback_disabled` | 接收者未开启反馈 |
-| 403 | `api_key_required` | 私有信息需要 API Key |
+| 403 | `api_key_required` | 私有信息/文件需要 API Key |
 | 403 | `user_mismatch` | 凭据与 `user_name` 不匹配 |
 | 403 | `admin_required` | 需要管理员权限 |
 | 403 | `cross_origin_denied` | 跨站请求被拒绝 |
-| 404 | `not_found` / `feedback_not_found` | 资源不存在 |
+| 404 | `not_found` / `feedback_not_found` / `file_not_found` | 资源不存在 |
 | 409 | `already_setup` / `username_taken` | 已初始化 / 用户名被占用 |
+| 413 | `file_too_large` | 超过单文件大小上限 |
+| 413 | `storage_quota_exceeded` | 剩余存储空间不足 |
 | 429 | `rate_limited` | 触发限流，响应带 `Retry-After` |
 | 500 | `missing_secret` / `decryption_failed` | 服务端密钥缺失或密钥不一致 |
 
@@ -412,13 +519,14 @@ curl -X POST "$BASE/api/sendfeedback" \
 | 登录态失效 | 用户表 `token_version`，修改/重置密码后旧 Token 立即失效 |
 | 密码存储 | PBKDF2-SHA256，每用户 16 字节随机盐，默认 100,000 次迭代（可配置） |
 | 数据加密 | AES-256-GCM，密钥 = HKDF-SHA256(`JWT_SECRET`)，每条数据随机 12 字节 IV |
-| 加密字段 | 信息 `value`、反馈标题与正文、反馈简介、API Key 明文 |
+| 加密字段 | 信息 `value`、反馈标题与正文、反馈简介、API Key 明文、文件名、文件内容 |
+| 文件存储 | 内容以 AES-256-GCM 加密后按 900 KB 分块写入 D1；私有文件下载需所有者 API Key，响应带 `nosniff` 与 `CSP: sandbox` |
 | API Key | 数据库只存 SHA-256 摘要（查找）与 AES-GCM 密文（本人回显），格式 `mdp_` + 48 位十六进制 |
 | 注册码 | 80 bit 随机、去除易混淆字符，只存 SHA-256 摘要；支持限次、过期、吊销；注册失败自动回滚次数 |
 | CSRF | `SameSite=Strict` Cookie + 校验 `Origin` 与请求 Host 一致 |
 | XSS | 前端所有动态内容经 `escapeHtml`；严格 CSP（`public/_headers`），无内联脚本/样式 |
-| 限流 | 基于 D1 的固定窗口计数：登录、注册、初始化、反馈提交/回复、信息读写等 |
-| 越权 | `api_key` 必须属于 `user_name` 对应用户；后台接口强制校验资源归属 |
+| 限流 | 基于 D1 的固定窗口计数：登录、注册、初始化、反馈提交/回复、信息读写、文件上传/删除等 |
+| 越权 | `api_key` 必须属于 `user_name` 对应用户；信息和文件均校验归属 |
 | 用户枚举 | 未知用户也执行一次等价的 PBKDF2 运算；登录错误信息不区分用户名/密码 |
 | 会话编号 | `session_id` 为 192 bit 随机值，等同 bearer token，无法枚举 |
 | 响应头 | `X-Frame-Options: DENY`、`nosniff`、`no-referrer`、CSP、`Permissions-Policy` |
@@ -441,8 +549,11 @@ curl -X POST "$BASE/api/sendfeedback" \
 | `feedback_messages` | 会话消息：`feedback` / `reply`，正文密文，按 id 排序 |
 | `registration_codes` | 注册码哈希、备注、次数、过期时间、吊销标记 |
 | `rate_limits` | 限流固定窗口计数 |
+| `user_storage` | 每用户存储配额与已用空间（`quota` / `used`） |
+| `files` | 文件元数据：文件名密文、大小、分块数、类型、公开/私有、下载次数 |
+| `file_chunks` | 文件密文分块（`file_id` + `idx` 主键），单块 900 KB |
 
-所有表由 `migrations/0001_init.sql` 定义；`src/db/schema.generated.ts` 由脚本生成，用于 Worker 首次请求时自动建表。
+表结构由 `migrations/0001_init.sql`、`migrations/0002_file_storage.sql` 定义；`src/db/schema.generated.ts` 由脚本生成，用于 Worker 首次请求时自动建表。
 
 ## 环境变量
 
@@ -455,31 +566,35 @@ curl -X POST "$BASE/api/sendfeedback" \
 | `DISPLAY_TZ` | 否 | `Asia/Shanghai` | 时间展示时区（IANA） |
 | `SESSION_TTL_HOURS` | 否 | `168` | 登录有效期（1–2160 小时） |
 | `PASSWORD_ITERATIONS` | 否 | `100000` | PBKDF2 迭代次数（10000–500000） |
+| `MAX_FILE_SIZE_MB` | 否 | `10` | 单文件大小上限（1–20 MB） |
+| `DEFAULT_STORAGE_QUOTA_MB` | 否 | `50` | 新用户默认存储空间（1–10240 MB，管理后台可覆盖） |
 | `RATE_LIMIT_DISABLED` | 否 | — | 设为 `1` 关闭限流（仅用于自动化测试） |
 
 ## 项目结构
 
 ```text
 .
-├── migrations/0001_init.sql      # D1 表结构（唯一来源）
-├── public/                       # 静态资源（SPA）
+├── migrations/0001_init.sql       # 基础表结构
+├── migrations/0002_file_storage.sql  # 文件存储与配额
+├── public/                        # 静态资源（SPA）
 │   ├── index.html
-│   ├── app.js                    # 前端路由与页面
-│   ├── styles.css                # 设计系统与响应式布局
+│   ├── app.js                     # 前端路由与页面
+│   ├── docs.js                    # 内置 API 文档内容
+│   ├── styles.css                 # 设计系统与响应式布局
 │   ├── favicon.svg
-│   ├── _headers                  # 安全响应头 / CSP
+│   ├── _headers                   # 安全响应头 / CSP
 │   └── robots.txt
-├── scripts/gen-schema.mjs        # 由迁移 SQL 生成 src/db/schema.generated.ts
+├── scripts/gen-schema.mjs         # 由迁移 SQL 生成 src/db/schema.generated.ts
 ├── src/
-│   ├── index.ts                  # Worker 入口
-│   ├── app.ts                    # 路由表与错误处理
-│   ├── env.ts                    # 绑定与运行时上下文
-│   ├── auth/                     # 会话、API Key/会话身份解析、限流
-│   ├── data/                     # 用户、信息、反馈、注册码、统计
-│   ├── db/                       # D1 查询工具与 schema
-│   ├── lib/                      # 加密、编码、时间、HTTP、校验
-│   └── routes/                   # 各接口处理器
-├── tests/                        # node:test 集成测试 + D1 兼容层
+│   ├── index.ts                   # Worker 入口
+│   ├── app.ts                     # 路由表与错误处理
+│   ├── env.ts                     # 绑定与运行时上下文
+│   ├── auth/                      # 会话、API Key/会话身份解析、限流
+│   ├── data/                      # 用户、信息、反馈、注册码、文件存储、统计
+│   ├── db/                        # D1 查询工具与 schema
+│   ├── lib/                       # 加密、编码、时间、HTTP、校验
+│   └── routes/                    # 各接口处理器
+├── tests/                         # node:test 集成测试 + D1 兼容层
 ├── wrangler.jsonc
 └── package.json
 ```
@@ -487,7 +602,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 ## 测试
 
 ```bash
-pnpm test        # 19 个集成测试，覆盖认证、注册码、API Key、信息、反馈、越权、限流、管理后台
+pnpm test        # 25 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、配额、越权、限流、管理后台
 pnpm typecheck
 pnpm check       # 以上两项
 ```
@@ -511,6 +626,15 @@ pnpm check       # 以上两项
 **Q：注册码在哪里查看？**
 注册码只保存哈希，生成时展示一次；丢失后请吊销并重新生成。
 
+**Q：文件存在哪里？有大小限制吗？**
+文件内容加密后按 900 KB 分块存入 D1（`file_chunks`）。单文件默认 10 MB（`MAX_FILE_SIZE_MB`），每用户默认 50 MB（`DEFAULT_STORAGE_QUOTA_MB`），管理员可在「管理后台」调整。
+
+**Q：私有文件怎么下载？**
+在链接后追加 `&api_key=mdp_xxx`，或使用 `X-API-Key: mdp_xxx` 请求头，或由文件所有者登录后访问。公开文件无需凭据。
+
+**Q：调整“新用户默认空间”会影响老用户吗？**
+不会。默认值只用于之后注册的用户；老用户需要在用户列表中点硬盘图标单独调整。
+
 **Q：Free 计划登录报 1102（CPU 超时）？**
 降低 `PASSWORD_ITERATIONS`（如 10000）或升级 Workers Paid。
 
@@ -528,9 +652,13 @@ pnpm check       # 以上两项
 8. **“获取反馈”缺少标题与分页**：补充可选 `title`、`limit`/`offset` 与自动摘要标题。
 9. **管理员缺少用户管理**：补充用户列表、重置密码、删除用户（级联清理数据），并禁止删除最后一个管理员/自己。
 10. **缺少公开反馈入口**：补充 `#/f/<用户名>` 公开页面，访客无需注册即可提交并继续对话（记录保存在浏览器本地）。
-11. **一键部署无法预设密钥**：`wrangler deploy` 自动创建 D1；首次请求自动建表；密钥未配置时给出可操作的错误页。
-12. **安全加固**：统一为 POST + JSON、API Key 哈希存储、全部敏感字段加密、PBKDF2 密码哈希、CSRF 校验、限流、密码强度校验、安全响应头。
+11. **部署时无法预设密钥**：`wrangler deploy` 支持自动创建 D1，首次请求自动建表；密钥未配置时给出可操作的错误页，并说明如何在 Workers Builds 中添加运行时 Secret。
+12. **安全加固**：统一为 POST + JSON、API Key 哈希存储、全部敏感字段与文件加密、PBKDF2 密码哈希、CSRF 校验、限流、密码强度校验、安全响应头。
 13. **工程化**：TypeScript 严格模式、集成测试、CI、schema 生成脚本、迁移与自动建表一致性测试。
+14. **新增文件存储**：`/uploadfile`、`/downloadfile`、`/deletefile`；文件加密分块存入 D1，单文件可设置是否需要 API Key；管理员可设置每个用户的配额与新用户默认配额。
+15. **新增内置文档页**：侧栏底部「API 文档」，参考常见开发者文档布局，按接口分类展示参数、curl 示例与错误码，代码块支持一键复制。
+16. **所有 JSON 接口统一带 `status`**：成功为 `200`，错误与 HTTP 状态码一致；二进制下载通过 `X-API-Status` 响应头返回。
+17. **README 与登录页**：移除一键部署按钮，改为说明如何在 Cloudflare Workers 中连接 GitHub 仓库；登录页底部标注开源项目地址。
 
 ## License
 

@@ -1,8 +1,22 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { createHarness, createUser, ORIGIN, setupAdmin, TestClient, TEST_SECRET } from './helpers/harness.ts';
+import { ShimD1 } from './helpers/d1.ts';
+import { handleRequest } from '../src/app.ts';
 import { SCHEMA_STATEMENTS, SCHEMA_VERSION } from '../src/db/schema.generated.ts';
+
+const MB = 1024 * 1024;
+
+function textFile(content: string | Uint8Array, name = 'hello.txt', type = 'text/plain'): FormData {
+  const form = new FormData();
+  form.append('file', new File([content], name, { type }));
+  return form;
+}
+
+function byteFile(size: number, name = 'blob.bin'): FormData {
+  return textFile(new Uint8Array(size).fill(97), name, 'application/octet-stream');
+}
 
 const TIME_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
 
@@ -698,15 +712,366 @@ describe('管理后台', () => {
   });
 });
 
+describe('文件存储', () => {
+  it('上传文件后分块加密存储，可下载、列出并删除', async () => {
+    const harness = createHarness();
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+    const content = `hello 文件存储 ${'x'.repeat(200)}`;
+
+    const upload = await alice.client.upload<Record<string, any>>('/api/uploadfile', textFile(content));
+    assert.equal(upload.status, 200);
+    assert.equal(upload.data.status, 200);
+    const fileId = String(upload.data.file_id);
+    assert.match(fileId, /^[0-9a-f]{48}$/);
+    assert.equal(upload.data.name, 'hello.txt');
+    assert.equal(upload.data.size, Buffer.byteLength(content));
+    assert.equal(upload.data.private, false);
+    assert.match(String(upload.data.download_url), /\/api\/downloadfile\?id=/);
+
+    const row = harness.db.raw.prepare('SELECT name_enc, size, chunk_count FROM files WHERE id = ?').get(fileId) as {
+      name_enc: string;
+      size: number;
+      chunk_count: number;
+    };
+    assert.ok(row.name_enc.startsWith('v1.'));
+    assert.ok(!row.name_enc.includes('hello'));
+    assert.equal(Number(row.size), Buffer.byteLength(content));
+    assert.equal(Number(row.chunk_count), 1);
+
+    const chunk = harness.db.raw.prepare('SELECT data FROM file_chunks WHERE file_id = ?').get(fileId) as {
+      data: Uint8Array;
+    };
+    const chunkText = Buffer.from(chunk.data).toString('utf8');
+    assert.ok(!chunkText.includes('hello'));
+    assert.ok(!chunkText.includes('文件存储'));
+
+    const response = await new TestClient(harness.env).download(String(upload.data.url_path));
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('x-api-status'), '200');
+    assert.match(response.headers.get('content-disposition') ?? '', /^attachment;/);
+    assert.match(response.headers.get('content-disposition') ?? '', /filename\*=UTF-8''/);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    assert.equal(Buffer.from(bytes).toString('utf8'), content);
+
+    const head = await handleRequest(
+      new Request(`${ORIGIN}${upload.data.url_path}`, { method: 'HEAD' }),
+      harness.env,
+    );
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get('content-length'), String(Buffer.byteLength(content)));
+
+    const list = await alice.client.post<Record<string, any>>('/api/files/list');
+    assert.equal(list.data.files.length, 1);
+    assert.equal(list.data.files[0].name, 'hello.txt');
+    assert.equal(list.data.storage.used, Buffer.byteLength(content));
+    assert.equal(list.data.storage.quota, 50 * MB);
+    assert.equal(list.data.storage.file_count, 1);
+    assert.equal(list.data.limits.max_file_size, 10 * MB);
+
+    const deleted = await alice.client.post<Record<string, any>>('/api/deletefile', { file_id: fileId });
+    assert.equal(deleted.status, 200);
+    assert.equal(deleted.data.storage.used, 0);
+    const chunks = harness.db.raw.prepare('SELECT COUNT(*) AS total FROM file_chunks WHERE file_id = ?').get(fileId) as {
+      total: number;
+    };
+    assert.equal(Number(chunks.total), 0);
+    const gone = await new TestClient(harness.env).download(String(upload.data.url_path));
+    assert.equal(gone.status, 404);
+  });
+
+  it('私有文件需要所有者 api_key 或登录态才能下载', async () => {
+    const harness = createHarness();
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+    const bob = await createUser(harness, { username: 'bob' });
+    const keyResponse = await alice.client.post<{ api_key: { key: string } }>('/api/apikeys/create', { name: 'download' });
+    const aliceKey = keyResponse.data.api_key.key;
+    const bobKey = await bob.client.post<{ api_key: { key: string } }>('/api/apikeys/create', { name: 'bob' });
+
+    const form = textFile('private secret', 'secret.txt');
+    form.append('private', 'true');
+    const upload = await new TestClient(harness.env).upload<Record<string, any>>(
+      `/api/uploadfile?api_key=${aliceKey}`,
+      form,
+    );
+    assert.equal(upload.status, 200);
+    assert.equal(upload.data.private, true);
+    const urlPath = String(upload.data.url_path);
+
+    const anonymous = await new TestClient(harness.env).download(urlPath);
+    assert.equal(anonymous.status, 403);
+    const anonymousBody = (await anonymous.json()) as Record<string, unknown>;
+    assert.equal(anonymousBody.error, 'api_key_required');
+
+    const wrongKey = await new TestClient(harness.env).download(`${urlPath}&api_key=${bobKey.data.api_key.key}`);
+    assert.equal(wrongKey.status, 403);
+    assert.equal(((await wrongKey.json()) as Record<string, unknown>).error, 'invalid_api_key');
+
+    const ownerKey = await new TestClient(harness.env).download(`${urlPath}&api_key=${aliceKey}`);
+    assert.equal(ownerKey.status, 200);
+    assert.equal(Buffer.from(await ownerKey.arrayBuffer()).toString('utf8'), 'private secret');
+
+    const headerKey = await new TestClient(harness.env).download(urlPath, { 'x-api-key': aliceKey });
+    assert.equal(headerKey.status, 200);
+
+    const ownerSession = await alice.client.download(urlPath);
+    assert.equal(ownerSession.status, 200);
+
+    const otherSession = await bob.client.download(urlPath);
+    assert.equal(otherSession.status, 403);
+
+    const makePublic = await alice.client.post('/api/files/visibility', { id: upload.data.file_id, private: false });
+    assert.equal(makePublic.status, 200);
+    const publicDownload = await new TestClient(harness.env).download(urlPath);
+    assert.equal(publicDownload.status, 200);
+
+    const makePrivate = await alice.client.post('/api/files/visibility', { id: upload.data.file_id, private: true });
+    assert.equal(makePrivate.status, 200);
+    const deniedAgain = await new TestClient(harness.env).download(urlPath);
+    assert.equal(deniedAgain.status, 403);
+  });
+
+  it('管理员可设置新用户默认配额与单用户配额，超额上传被拒绝', async () => {
+    const harness = createHarness();
+    await setupAdmin(harness);
+    await createUser(harness, { username: 'alice' });
+
+    const settings = await harness.client.post<Record<string, any>>('/api/admin/storage', { default_quota_mb: 1 });
+    assert.equal(settings.status, 200);
+    assert.equal(settings.data.default_quota, 1 * MB);
+    assert.equal(settings.data.default_quota_mb, 1);
+
+    const bob = await createUser(harness, { username: 'bob' });
+    const users = await harness.client.post<Record<string, any>>('/api/admin/users/list');
+    assert.equal(users.data.default_quota, 1 * MB);
+    const aliceRow = users.data.users.find((user: Record<string, unknown>) => user.username === 'alice');
+    const bobRow = users.data.users.find((user: Record<string, unknown>) => user.username === 'bob');
+    assert.equal(aliceRow.storage_quota, 50 * MB, '默认配额只影响新用户');
+    assert.equal(bobRow.storage_quota, 1 * MB);
+    assert.equal(bobRow.storage_used, 0);
+    assert.equal(bobRow.file_count, 0);
+
+    const tooBig = await bob.client.upload('/api/uploadfile', byteFile(Math.round(1.2 * MB)));
+    assert.equal(tooBig.status, 413);
+    assert.equal(tooBig.data.error, 'storage_quota_exceeded');
+
+    const first = await bob.client.upload<Record<string, any>>('/api/uploadfile', byteFile(400 * 1024, 'a.bin'));
+    assert.equal(first.status, 200);
+    const exceed = await bob.client.upload('/api/uploadfile', byteFile(700 * 1024, 'b.bin'));
+    assert.equal(exceed.status, 413);
+
+    const deleted = await bob.client.post('/api/deletefile', { file_id: first.data.file_id });
+    assert.equal(deleted.status, 200);
+    const second = await bob.client.upload('/api/uploadfile', byteFile(700 * 1024, 'b.bin'));
+    assert.equal(second.status, 200);
+
+    const raised = await harness.client.post<Record<string, any>>('/api/admin/users/storage', {
+      id: bobRow.id,
+      quota_mb: 3,
+    });
+    assert.equal(raised.status, 200);
+    assert.equal(raised.data.storage.quota, 3 * MB);
+    assert.equal(raised.data.storage.used, 700 * 1024);
+
+    const bigger = await bob.client.upload('/api/uploadfile', byteFile(1.5 * MB, 'c.bin'));
+    assert.equal(bigger.status, 200);
+
+    const zero = await harness.client.post('/api/admin/users/storage', { id: bobRow.id, quota_mb: 0 });
+    assert.equal(zero.status, 200);
+    const blocked = await bob.client.upload('/api/uploadfile', byteFile(1, 'd.bin'));
+    assert.equal(blocked.status, 413);
+
+    const denied = await bob.client.post('/api/admin/storage', { default_quota_mb: 5 });
+    assert.equal(denied.status, 403);
+    assert.equal(denied.data.error, 'admin_required');
+  });
+
+  it('支持原始二进制上传、中文文件名与大小校验', async () => {
+    const harness = createHarness();
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+    const keyResponse = await alice.client.post<{ api_key: { key: string } }>('/api/apikeys/create', { name: 'raw' });
+    const apiKey = keyResponse.data.api_key.key;
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 250]);
+
+    const raw = await new TestClient(harness.env).uploadRaw<Record<string, any>>(
+      `/api/uploadfile?api_key=${apiKey}`,
+      bytes,
+      {
+        'content-type': 'application/octet-stream',
+        'x-file-name': encodeURIComponent('数据.bin'),
+      },
+    );
+    assert.equal(raw.status, 200);
+    assert.equal(raw.data.name, '数据.bin');
+    const download = await new TestClient(harness.env).download(String(raw.data.url_path));
+    assert.equal(download.status, 200);
+    assert.equal(Buffer.from(await download.arrayBuffer()).toString('hex'), Buffer.from(bytes).toString('hex'));
+
+    const empty = await alice.client.upload('/api/uploadfile', textFile(''));
+    assert.equal(empty.status, 400);
+    assert.equal(empty.data.error, 'empty_file');
+
+    const noFile = await alice.client.upload('/api/uploadfile', new FormData());
+    assert.equal(noFile.status, 400);
+    assert.equal(noFile.data.error, 'missing_file');
+
+    const small = createHarness({ MAX_FILE_SIZE_MB: '1' });
+    await setupAdmin(small);
+    const smallUser = await createUser(small, { username: 'alice' });
+    const oversize = await smallUser.client.upload('/api/uploadfile', byteFile(MB + 10));
+    assert.equal(oversize.status, 413);
+    assert.equal(oversize.data.error, 'file_too_large');
+  });
+
+  it('删除用户会清理文件、分块与配额记录', async () => {
+    const harness = createHarness();
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+    const upload = await alice.client.upload<Record<string, any>>('/api/uploadfile', byteFile(2048, 'x.bin'));
+    assert.equal(upload.status, 200);
+
+    const before = await harness.client.post<Record<string, any>>('/api/admin/stats');
+    assert.equal(before.data.stats.files, 1);
+    assert.equal(before.data.stats.storage_used, 2048);
+
+    const users = await harness.client.post<Record<string, any>>('/api/admin/users/list');
+    const aliceRow = users.data.users.find((user: Record<string, unknown>) => user.username === 'alice');
+    const removed = await harness.client.post('/api/admin/users/delete', { id: aliceRow.id });
+    assert.equal(removed.status, 200);
+
+    for (const table of ['files', 'file_chunks']) {
+      const row = harness.db.raw.prepare(`SELECT COUNT(*) AS total FROM ${table}`).get() as { total: number };
+      assert.equal(Number(row.total), 0, `${table} 应被清空`);
+    }
+    const storageRow = harness.db.raw
+      .prepare('SELECT COUNT(*) AS total FROM user_storage WHERE user_id = ?')
+      .get(aliceRow.id) as { total: number };
+    assert.equal(Number(storageRow.total), 0, 'user_storage 应被清空');
+    const after = await harness.client.post<Record<string, any>>('/api/admin/stats');
+    assert.equal(after.data.stats.files, 0);
+    assert.equal(after.data.stats.storage_used, 0);
+  });
+});
+
+describe('响应格式', () => {
+  it('所有 JSON 接口都带 status，二进制下载带 x-api-status 头', async () => {
+    const harness = createHarness();
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+
+    const responses = [
+      await harness.client.get<Record<string, unknown>>('/api/health'),
+      await harness.client.post<Record<string, unknown>>('/api/auth/status'),
+      await harness.client.post<Record<string, unknown>>('/api/overview'),
+      await alice.client.post<Record<string, unknown>>('/api/information/list'),
+      await alice.client.post<Record<string, unknown>>('/api/feedback/list'),
+      await alice.client.post<Record<string, unknown>>('/api/files/list'),
+      await harness.client.post<Record<string, unknown>>('/api/admin/stats'),
+    ];
+    for (const response of responses) {
+      assert.equal(response.status, 200);
+      assert.equal(response.data.status, 200);
+    }
+
+    const upload = await alice.client.upload<Record<string, any>>('/api/uploadfile', byteFile(16, 's.bin'));
+    assert.equal(upload.data.status, 200);
+    const download = await new TestClient(harness.env).download(String(upload.data.url_path));
+    assert.equal(download.headers.get('x-api-status'), '200');
+
+    const missing = await alice.client.post<Record<string, unknown>>('/api/does-not-exist');
+    assert.equal(missing.status, 404);
+    assert.equal(missing.data.status, 404);
+
+    const badParam = await alice.client.post<Record<string, unknown>>('/api/setinformation');
+    assert.equal(badParam.status, 400);
+    assert.equal(badParam.data.status, 400);
+
+    const errorDownload = await new TestClient(harness.env).download('/api/downloadfile?id=missing');
+    assert.equal(errorDownload.status, 404);
+    const errorBody = (await errorDownload.json()) as Record<string, unknown>;
+    assert.equal(errorBody.status, 404);
+  });
+});
+
 describe('数据库与接口一致性', () => {
   it('生成的 schema 与迁移 SQL 保持一致', () => {
-    assert.equal(SCHEMA_VERSION, 1);
-    const sql = readFileSync(new URL('../migrations/0001_init.sql', import.meta.url), 'utf8');
-    const parts = sql
-      .split('--> statement-breakpoint')
-      .map((part) => part.trim())
-      .filter((part) => part.length > 0 && !/^(--[^\n]*\n?)+$/.test(part));
+    assert.equal(SCHEMA_VERSION, 2);
+    const migrationsDir = new URL('../migrations/', import.meta.url);
+    const files = readdirSync(migrationsDir)
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+      .sort();
+    assert.ok(files.length >= 2);
+
+    const parts: string[] = [];
+    for (const file of files) {
+      const sql = readFileSync(new URL(file, migrationsDir), 'utf8');
+      parts.push(
+        ...sql
+          .split('--> statement-breakpoint')
+          .map((part) => part.trim())
+          .filter((part) => part.length > 0 && !/^(--[^\n]*\n?)+$/.test(part)),
+      );
+    }
     assert.deepEqual([...SCHEMA_STATEMENTS], parts, '修改迁移后请运行 pnpm run gen:schema');
+  });
+
+  it('从 v1 数据库自动升级到 v2（不依赖 ALTER TABLE）', async () => {
+    const db = new ShimD1();
+    const migrationSql = readFileSync(new URL('../migrations/0001_init.sql', import.meta.url), 'utf8');
+    for (const statement of migrationSql.split('--> statement-breakpoint')) {
+      const sql = statement.trim();
+      if (sql && !/^(--[^\n]*\n?)+$/.test(sql)) {
+        db.raw.exec(sql);
+      }
+    }
+    const now = new Date().toISOString();
+    db.raw.prepare(`INSERT INTO meta (key, value, updated_at) VALUES ('schema_version', '1', ?)`).run(now);
+    db.raw
+      .prepare(
+        `INSERT INTO users (username, display_name, password_hash, role, feedback_enabled, created_at, updated_at)
+         VALUES ('legacy', 'legacy', 'pbkdf2$10000$AAAA$BBBB', 'user', 0, ?, ?)`,
+      )
+      .run(now, now);
+
+    const env = {
+      DB: db as unknown as D1Database,
+      JWT_SECRET: TEST_SECRET,
+      APP_NAME: '升级测试',
+      DISPLAY_TZ: 'Asia/Shanghai',
+      PASSWORD_ITERATIONS: '10000',
+      RATE_LIMIT_DISABLED: '1',
+    };
+    const status = await handleRequest(
+      new Request(`${ORIGIN}/api/auth/status`, { method: 'POST', headers: { origin: ORIGIN } }),
+      env,
+    );
+    assert.equal(status.status, 200);
+    const body = (await status.json()) as Record<string, unknown>;
+    assert.equal(body.needs_setup, true);
+
+    const versionRow = db.raw.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as {
+      value: string;
+    };
+    assert.equal(versionRow.value, '2');
+    const filesTable = db.raw
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'files'`)
+      .get() as { name?: string } | undefined;
+    assert.equal(filesTable?.name, 'files');
+    const storage = db.raw
+      .prepare('SELECT quota, used FROM user_storage WHERE user_id = 1')
+      .get() as { quota: number; used: number } | undefined;
+    assert.ok(storage, '已有用户应补上配额记录');
+    assert.equal(Number(storage?.quota), 50 * MB);
+    assert.equal(Number(storage?.used), 0);
+
+    // 第二次请求应跳过建表，不报重复表错误
+    const again = await handleRequest(
+      new Request(`${ORIGIN}/api/auth/status`, { method: 'POST', headers: { origin: ORIGIN } }),
+      env,
+    );
+    assert.equal(again.status, 200);
   });
 
   it('概览接口返回统计与最近反馈', async () => {

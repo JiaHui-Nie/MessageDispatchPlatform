@@ -55,6 +55,38 @@ export class TestClient {
     return { status: response.status, data: (await response.json()) as T, headers: response.headers };
   }
 
+  /** multipart/form-data 上传（不要手动设置 content-type，浏览器/undici 会自动加 boundary）。 */
+  async upload<T = Record<string, unknown>>(path: string, form: FormData): Promise<ApiResponse<T>> {
+    const headers = new Headers({ origin: ORIGIN });
+    if (this.cookie) headers.set('cookie', this.cookie);
+    const response = await handleRequest(new Request(`${ORIGIN}${path}`, { method: 'POST', headers, body: form }), this.env);
+    this.captureCookie(response);
+    return { status: response.status, data: (await response.json()) as T, headers: response.headers };
+  }
+
+  /** 原始二进制上传。 */
+  async uploadRaw<T = Record<string, unknown>>(
+    path: string,
+    bytes: Uint8Array,
+    headers: Record<string, string>,
+  ): Promise<ApiResponse<T>> {
+    const merged = new Headers({ origin: ORIGIN, ...headers });
+    if (this.cookie) merged.set('cookie', this.cookie);
+    const response = await handleRequest(
+      new Request(`${ORIGIN}${path}`, { method: 'POST', headers: merged, body: bytes }),
+      this.env,
+    );
+    this.captureCookie(response);
+    return { status: response.status, data: (await response.json()) as T, headers: response.headers };
+  }
+
+  /** 下载文件，返回原始 Response 以便校验二进制内容与响应头。 */
+  async download(path: string, headers: Record<string, string> = {}): Promise<Response> {
+    const merged = new Headers({ origin: ORIGIN, ...headers });
+    if (this.cookie) merged.set('cookie', this.cookie);
+    return handleRequest(new Request(`${ORIGIN}${path}`, { method: 'GET', headers: merged }), this.env);
+  }
+
   async get<T = Record<string, unknown>>(path: string): Promise<ApiResponse<T>> {
     const headers = new Headers({ origin: ORIGIN });
     if (this.cookie) headers.set('cookie', this.cookie);

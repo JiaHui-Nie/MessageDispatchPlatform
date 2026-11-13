@@ -2,13 +2,14 @@ import type { AppContext, Env } from './env.ts';
 import { createContext } from './env.ts';
 import { ensureSchema } from './db/d1.ts';
 import { ApiError } from './lib/errors.ts';
-import { assertSameOrigin, errorResponse, jsonResponse, readParams, type HttpMethod, type Params } from './lib/http.ts';
+import { assertSameOrigin, errorResponse, jsonResponse, queryParams, readParams, type HttpMethod, type Params } from './lib/http.ts';
 import { healthHandler, statusHandler } from './routes/system.ts';
 import * as auth from './routes/auth.ts';
 import * as apiKeys from './routes/apikeys.ts';
 import * as information from './routes/information.ts';
 import * as feedback from './routes/feedback.ts';
 import * as admin from './routes/admin.ts';
+import * as files from './routes/files.ts';
 import { overview } from './routes/overview.ts';
 
 export type Handler = (ctx: AppContext, request: Request, params: Params) => Promise<Response>;
@@ -17,6 +18,8 @@ interface RouteDef {
   method: HttpMethod;
   path: string;
   handler: Handler;
+  /** 为 true 时不预读请求体，由 handler 自行解析（文件上传）。 */
+  rawBody?: boolean;
 }
 
 interface DynamicRouteDef {
@@ -67,6 +70,18 @@ const ROUTES: RouteDef[] = [
   { method: 'POST', path: '/api/admin/users/reset-password', handler: admin.usersResetPassword },
 
   { method: 'POST', path: '/api/overview', handler: overview },
+
+  { method: 'POST', path: '/api/uploadfile', handler: files.uploadFile, rawBody: true },
+  { method: 'POST', path: '/api/downloadfile', handler: files.downloadFile },
+  { method: 'GET', path: '/api/downloadfile', handler: files.downloadFile },
+  { method: 'HEAD', path: '/api/downloadfile', handler: files.downloadFile },
+  { method: 'POST', path: '/api/deletefile', handler: files.deleteFileRoute },
+  { method: 'POST', path: '/api/files/list', handler: files.listFilesRoute },
+  { method: 'POST', path: '/api/files/visibility', handler: files.updateFileVisibility },
+  { method: 'POST', path: '/api/files/delete', handler: files.deleteFileUi },
+
+  { method: 'POST', path: '/api/admin/storage', handler: admin.storageSettings },
+  { method: 'POST', path: '/api/admin/users/storage', handler: admin.usersStorage },
 ];
 
 const DYNAMIC_ROUTES: DynamicRouteDef[] = [
@@ -75,6 +90,7 @@ const DYNAMIC_ROUTES: DynamicRouteDef[] = [
 ];
 
 const routeTable = new Map<string, Map<HttpMethod, Handler>>();
+const rawBodyPaths = new Set<string>();
 for (const route of ROUTES) {
   let methods = routeTable.get(route.path);
   if (!methods) {
@@ -82,6 +98,9 @@ for (const route of ROUTES) {
     routeTable.set(route.path, methods);
   }
   methods.set(route.method, route.handler);
+  if (route.rawBody) {
+    rawBodyPaths.add(route.path);
+  }
 }
 
 function normalizePath(pathname: string): string {
@@ -176,7 +195,7 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       );
     }
 
-    const params = await readParams(request);
+    const params = rawBodyPaths.has(pathname) ? queryParams(request) : await readParams(request);
     if (resolved.pathParams) {
       for (const [key, value] of Object.entries(resolved.pathParams)) {
         if (!params[key]) {

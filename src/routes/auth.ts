@@ -1,5 +1,6 @@
 import { countAdmins, authenticate, createUserWithPassword, findUserById, requireNewUsername, toPublicUser, updateUserPassword, assertPasswordChangeAllowed } from '../data/users.ts';
 import { claimRegistrationCode, releaseRegistrationCode } from '../data/registration.ts';
+import { getDefaultQuota, setUserQuota } from '../data/storage.ts';
 import { requireUser, buildClearSessionCookie, buildSessionCookie, issueSessionToken } from '../auth/session.ts';
 import { rateLimit } from '../auth/ratelimit.ts';
 import type { AppContext } from '../env.ts';
@@ -21,6 +22,7 @@ export async function setup(ctx: AppContext, request: Request, params: Params): 
     role: 'admin',
     iterations: ctx.passwordIterations,
   });
+  await setUserQuota(ctx, user.id, await getDefaultQuota(ctx));
   const token = await issueSessionToken(ctx, user);
   return ok({ user: toPublicUser(user, ctx.tz) }, { 'set-cookie': buildSessionCookie(ctx, request, token) });
 }
@@ -60,6 +62,7 @@ export async function register(ctx: AppContext, request: Request, params: Params
       role: 'user',
       iterations: ctx.passwordIterations,
     });
+    await setUserQuota(ctx, user.id, await getDefaultQuota(ctx));
     const token = await issueSessionToken(ctx, user);
     return ok(
       { user: toPublicUser(user, ctx.tz), display_name: displayName },
