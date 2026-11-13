@@ -63,7 +63,7 @@ export function renderDocs(origin) {
        response: `{
   "status": 200,
   "app": "信息分发平台",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "secret_configured": true,
   "database": "ok",
   "schema_version": 4,
@@ -345,6 +345,37 @@ x-api-status: 206
          <tr><td>私有</td><td>所有者 <code>api_key</code> 或所有者登录态</td><td>无效 Key 返回 <code>403 invalid_api_key</code>；未提供凭据返回 <code>403 api_key_required</code></td></tr>
        </tbody>
      </table></div>
+     <h3>预签名下载直链</h3>
+     ${endpoint({
+       path: '/api/files/download-url',
+       desc: '为 R2 直传文件生成短期 GET 直链；支持 API Key 或登录态，下载不经过 Worker。',
+       params: [
+         ['file_id', true, '文件 ID（兼容 <code>id</code>）'],
+         ['api_key', false, '私有文件需要所有者 API Key；也可用 <code>X-API-Key</code> 请求头'],
+       ],
+       note: '仅 <code>encrypted: false</code> 的 R2 直传文件可用；应用加密文件返回 <code>400 presigned_download_unavailable</code>。公开文件无需鉴权，私有文件需所有者。URL 是 bearer token，默认 60 分钟；直链下载不计入 <code>downloads</code>。',
+       example: `curl -X POST '${base}/api/files/download-url' \\
+  -H 'content-type: application/json' \\
+  -H 'x-api-key: mdp_xxx' \\
+  -d '{"file_id":"8b1f…"}'`,
+       response: `{
+  "status": 200,
+  "file_id": "8b1f…",
+  "name": "report.pdf",
+  "size": 314572800,
+  "private": true,
+  "encrypted": false,
+  "backend": "r2",
+  "method": "GET",
+  "download_url": "https://<bucket>.<account>.r2.cloudflarestorage.com/files/1/8b1f…?X-Amz-…",
+  "expires_in": 3600,
+  "expires_at": "2026-11-13T16:00:00.000Z",
+  "range_supported": true,
+  "download_counted": false
+}`,
+     })}
+     <p>与 <code>/api/downloadfile</code> 相比：预签名 URL 直接连 R2，速度更快、Worker 不承载下载流量；但 URL 在有效期内是 bearer token，无法单独撤销，且不能使用自定义域名。</p>
+     <p><strong>CORS：</strong>浏览器顶层打开链接下载不需要 CORS；如果用 <code>fetch</code> 读取直链，需要在 R2 桶 CORS 中允许 <code>GET</code>、<code>Range</code>，并暴露 <code>content-range</code>、<code>content-length</code>、<code>content-disposition</code>。</p>
      ${endpoint({
        path: '/api/deletefile',
        desc: '删除文件并释放配额。',
@@ -404,6 +435,7 @@ await fetch('/api/files/complete', {
          <tr><td><code>/api/files/list</code></td><td>❌</td><td>✅</td><td>网页后台文件列表</td></tr>
          <tr><td><code>/api/files/presign</code></td><td>❌</td><td>✅</td><td>大文件直传预签名</td></tr>
          <tr><td><code>/api/files/complete</code></td><td>❌</td><td>✅</td><td>直传完成登记</td></tr>
+         <tr><td><code>/api/files/download-url</code></td><td>✅</td><td>✅</td><td>直传文件预签名下载直链</td></tr>
          <tr><td><code>/api/files/visibility</code></td><td>❌</td><td>✅</td><td>切换公开/私有</td></tr>
        </tbody>
      </table></div>
@@ -500,6 +532,7 @@ await fetch('/api/files/complete', {
       <tbody>
         <tr><td>400</td><td><code>missing_*</code> / <code>invalid_*</code></td><td>参数缺失或格式不正确</td></tr>
         <tr><td>400</td><td><code>invalid_code</code> / <code>expired_code</code></td><td>注册码无效、用完、吊销或过期</td></tr>
+        <tr><td>400</td><td><code>presigned_download_unavailable</code></td><td>文件不是 R2 直传文件，不能生成预签名下载</td></tr>
         <tr><td>401</td><td><code>auth_required</code> / <code>invalid_api_key</code></td><td>未登录或 API Key 无效</td></tr>
         <tr><td>403</td><td><code>api_key_required</code></td><td>私有信息/文件需要所有者 API Key</td></tr>
         <tr><td>403</td><td><code>feedback_disabled</code> / <code>admin_required</code></td><td>反馈未开启 / 需要管理员</td></tr>

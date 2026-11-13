@@ -25,7 +25,7 @@ import { decryptString } from '../lib/crypto.ts';
 import { randomHex } from '../lib/encoding.ts';
 import { ApiError, badRequest, forbidden, notFound, payloadTooLarge } from '../lib/errors.ts';
 import { boolParam, intParam, ok, optionalString, stringParam, type Params } from '../lib/http.ts';
-import { presignR2Put, R2_PRESIGN_EXPIRES_SECONDS } from '../lib/r2-presign.ts';
+import { presignR2Get, presignR2Put, R2_PRESIGN_EXPIRES_SECONDS } from '../lib/r2-presign.ts';
 import { formatTime } from '../lib/time.ts';
 import { runStatement } from '../db/d1.ts';
 
@@ -247,6 +247,76 @@ export async function completeUpload(ctx: AppContext, request: Request, params: 
     url_path: view.url_path,
     download_url: `${origin}${view.url_path}`,
     storage: await getStorageInfo(ctx, session.user.id),
+  });
+}
+
+/** /api/files/download-url：为 R2 直传文件生成短期预签名 GET 直链。 */
+export async function createDownloadUrl(ctx: AppContext, request: Request, params: Params): Promise<Response> {
+  const fileId = (params.file_id ?? params.id ?? '').trim();
+  if (!fileId) {
+    throw badRequest('missing_id', '缺少参数 file_id');
+  }
+  const row = await findFileRow(ctx.db, fileId);
+  if (!row) {
+    throw notFound('file_not_found', '文件不存在或已被删除');
+  }
+  const apiKey = (params.api_key ?? request.headers.get('x-api-key') ?? '').trim();
+  const keyOwner = apiKey ? await findApiKeyOwner(ctx, apiKey) : null;
+  const session = await currentUser(ctx, request);
+  const actor = keyOwner ?? session;
+
+  if (row.private === 1) {
+    if (!actor) {
+      if (apiKey) {
+        throw forbidden('invalid_api_key', 'API Key 无效');
+      }
+      throw forbidden('api_key_required', '该文件为私有文件，需要提供 api_key 或登录文件所有者账号');
+    }
+    if (actor.user.id !== row.user_id) {
+      throw forbidden(apiKey ? 'invalid_api_key' : 'forbidden', '无权下载该文件');
+    }
+  }
+
+  const directR2 = row.storage === 'r2' && Number(row.encrypted ?? 1) === 0;
+  if (!directR2) {
+    throw badRequest(
+      'presigned_download_unavailable',
+      '只有 R2 直传文件支持预签名下载；应用加密文件请使用 /api/downloadfile',
+    );
+  }
+  if (!ctx.files) {
+    throw new ApiError(503, 'storage_not_configured', '该文件存储在 R2，但当前 Worker 未绑定 FILES');
+  }
+
+  const ip = (request.headers.get('cf-connecting-ip') ?? 'unknown').trim() || 'unknown';
+  await rateLimit(ctx, `files:download-url:${actor ? `u${actor.user.id}` : `ip:${ip}`}`, 60, 600);
+
+  const objectKey = fileObjectKey(row);
+  const object = await ctx.files.head(objectKey);
+  if (!object) {
+    throw notFound('file_not_found', '文件数据不存在或已被删除');
+  }
+  const filename = await decryptString(ctx.secret, row.name_enc);
+  const expiresIn = ctx.downloadUrlTtlSeconds;
+  const url = await presignR2Get(ctx.env, objectKey, row.content_type, contentDisposition(filename), expiresIn);
+
+  return ok({
+    user_name: actor?.user.username ?? null,
+    file_id: row.id,
+    name: filename,
+    size: Number(object.size),
+    content_type: row.content_type,
+    private: row.private === 1,
+    encrypted: false,
+    backend: 'r2',
+    direct: true,
+    method: 'GET',
+    download_url: url,
+    expires_in: expiresIn,
+    expires_at: new Date(Date.now() + expiresIn * 1000).toISOString(),
+    range_supported: true,
+    download_counted: false,
+    url_path: `/api/downloadfile?id=${encodeURIComponent(row.id)}`,
   });
 }
 

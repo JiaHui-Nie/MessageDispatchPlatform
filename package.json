@@ -1,6 +1,6 @@
 {
   "name": "message-dispatch-platform",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "type": "module",
   "description": "基于 Cloudflare Workers + D1 的信息分发与反馈回复平台",

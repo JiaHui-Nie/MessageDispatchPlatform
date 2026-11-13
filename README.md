@@ -220,9 +220,9 @@ pnpm db:migrate:local
    [
      {
        "AllowedOrigins": ["https://your.domain.com"],
-       "AllowedMethods": ["PUT"],
-       "AllowedHeaders": ["content-type"],
-       "ExposeHeaders": ["ETag"],
+       "AllowedMethods": ["PUT", "GET"],
+       "AllowedHeaders": ["content-type", "range"],
+       "ExposeHeaders": ["ETag", "Content-Range", "Content-Length", "Content-Disposition"],
        "MaxAgeSeconds": 3600
      }
    ]
@@ -234,7 +234,7 @@ pnpm db:migrate:local
 
 - 预签名 URL 有效期 15 分钟；上传完成后 Worker 用 `HEAD` 校验实际大小，再占用配额，超出配额会删除对象。
 - 直传文件仅依赖 **R2 服务端加密**（AES-256），不使用本项目的 `JWT_SECRET` 端到端加密；文件列表会标注「R2 直传」，Worker 上传的文件标注「应用加密」。
-- 预签名与登记接口只接受**登录态**，不支持 API Key；第三方 API 客户端请使用 `/api/uploadfile`（受 Worker 限制）。
+- 上传预签名与登记接口只接受**登录态**；下载直链接口 `/api/files/download-url` 支持 API Key 与登录态。
 - 未完成的上传对象不计配额，但会留在桶里；可给 `files/` 前缀配置生命周期规则定期清理。
 - 浏览器直传必须配置 CORS，否则会在预检阶段被拦截。
 
@@ -470,6 +470,7 @@ curl -X POST "$BASE/api/uploadfile?api_key=$KEY" \
 | `/api/files/list` | ❌ | ✅ | 文件列表与直传状态 |
 | `/api/files/presign` | ❌ | ✅ | 大文件预签名 |
 | `/api/files/complete` | ❌ | ✅ | 直传完成登记 |
+| `/api/files/download-url` | ✅ | ✅ | 直传文件预签名下载直链 |
 | `/api/files/visibility` | ❌ | ✅ | 切换公开/私有 |
 
 #### ⑩ 下载文件
@@ -529,7 +530,45 @@ curl -L 'https://your-worker.workers.dev/api/downloadfile?id=8b1f…' \
 curl -I 'https://your-worker.workers.dev/api/downloadfile?id=8b1f…'
 ```
 
-#### ⑪ 删除文件
+#### ⑪ 预签名下载直链
+
+```http
+POST /api/files/download-url
+```
+
+为 **R2 直传文件**（`encrypted: false`）生成短期 GET 直链，浏览器/客户端直接连 R2 下载，不经过 Worker。
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `file_id` | 是 | 文件 ID（兼容 `id`） |
+| `api_key` | 否 | 私有文件需要所有者 API Key；也可用 `X-API-Key` 请求头；公开文件可省略 |
+
+```json
+{
+  "status": 200,
+  "file_id": "8b1f…",
+  "name": "report.pdf",
+  "size": 314572800,
+  "private": true,
+  "encrypted": false,
+  "backend": "r2",
+  "method": "GET",
+  "download_url": "https://<bucket>.<account>.r2.cloudflarestorage.com/files/1/8b1f…?X-Amz-…",
+  "expires_in": 3600,
+  "expires_at": "2026-11-13T16:00:00.000Z",
+  "range_supported": true,
+  "download_counted": false
+}
+```
+
+- 仅 `encrypted: false` 的 R2 直传文件可用；应用加密文件返回 `400 presigned_download_unavailable`。
+- 公开文件无需鉴权；私有文件必须由所有者生成，其他人返回 `403`。
+- URL 默认 **60 分钟**有效，可用 `DOWNLOAD_URL_TTL_MINUTES` 调整（1–1440 分钟）；URL 是 bearer token，泄露后在有效期内可被下载。
+- 直链由 R2 提供原生 Range，可断点续传；直链下载不计入 `downloads`。
+- 直链域名是 R2 S3 域名，**不能使用自定义域名**；签名时已包含文件名和 Content-Type。
+- 浏览器顶层打开链接下载不需要 CORS；用 `fetch` 读取直链需要在桶 CORS 中允许 `GET`、`Range`。
+
+#### ⑫ 删除文件
 
 ```http
 POST /api/deletefile
@@ -543,7 +582,7 @@ POST /api/deletefile
 
 删除后立即释放配额，下载链接失效。
 
-#### ⑫ R2 预签名直传
+#### ⑬ R2 预签名直传
 
 ```http
 POST /api/files/presign
@@ -613,6 +652,7 @@ Worker 会用 `HEAD` 读取实际对象大小并占用配额；超出配额或�
 | `POST /api/files/list` | — | 自己的文件列表、配额、当前存储后端与直传状态 |
 | `POST /api/files/presign` | `name`、`size`、`content_type`、`private` | 生成 R2 直传 URL（大文件） |
 | `POST /api/files/complete` | `file_id`、`name`、`content_type`、`private` | 直传完成后登记文件并校验配额 |
+| `POST /api/files/download-url` | `file_id`、`api_key`（私有） | 生成直传文件的 R2 预签名下载直链 |
 | `POST /api/files/visibility` | `id`、`private` | 切换文件公开/私有 |
 | `POST /api/files/delete` | `id` | 删除自己的文件 |
 | `POST /api/overview` | — | 总览统计、存储用量与最近反馈 |
@@ -638,7 +678,7 @@ GET /api/health
 ```
 
 ```json
-{ "status": 200, "app": "信息分发平台", "version": "1.4.0", "secret_configured": true,
+{ "status": 200, "app": "信息分发平台", "version": "1.5.0", "secret_configured": true,
   "database": "ok", "schema_version": 4, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
 ```
 
@@ -651,6 +691,7 @@ GET /api/health
 | 400 | `missing_*` / `invalid_*` | 参数缺失或格式不正确 |
 | 400 | `invalid_code` / `expired_code` | 注册码无效、已用完、已吊销或已过期 |
 | 400 | `weak_password` | 密码不满足强度要求 |
+| 400 | `presigned_download_unavailable` | 文件不是 R2 直传文件，不能生成预签名下载 |
 | 401 | `auth_required` | 未登录 |
 | 401 | `invalid_credentials` | 用户名或密码错误 |
 | 401 | `invalid_api_key` | API Key 无效 |
@@ -752,6 +793,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 | `R2_ACCESS_KEY_ID` | 否* | — | R2 S3 API Access Key（Secret） |
 | `R2_SECRET_ACCESS_KEY` | 否* | — | R2 S3 API Secret Key（Secret） |
 | `DIRECT_UPLOAD_THRESHOLD_MB` | 否 | `20` | 超过该大小的文件使用 R2 直传；`0` 表示全部直传 |
+| `DOWNLOAD_URL_TTL_MINUTES` | 否 | `60` | 预签名下载 URL 有效期（1–1440 分钟） |
 
 > 标记 `*` 的 R2 配置仅在大文件直传时需要，建议用 `pnpm exec wrangler secret put <名称>` 设置。
 | `RATE_LIMIT_DISABLED` | 否 | — | 设为 `1` 关闭限流（仅用于自动化测试） |
@@ -790,7 +832,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 ## 测试
 
 ```bash
-pnpm test        # 38 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2、直传、配额、越权、限流、管理后台
+pnpm test        # 39 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2、直传、预签名下载、配额、越权、限流、管理后台
 pnpm typecheck
 pnpm check       # 以上两项
 ```
@@ -857,6 +899,7 @@ pnpm check       # 以上两项
 19. **大文件 R2 直传**：超过阈值（默认 20 MB）的文件使用预签名 URL 由浏览器直接上传到 R2，绕过 Worker 的 128 MB 内存与请求体限制；上传完成后由 Worker `HEAD` 校验大小、占用配额并登记元数据，超额自动删除对象。
 20. **修复 v3 数据库升级 500**：自动迁移此前会从头执行全部历史 SQL，v3 数据库会重复执行 `0003` 的 `ADD COLUMN storage` 而失败；现在只执行版本号大于当前值的迁移，并跳过已存在列的 `ADD COLUMN`。新增 v3→v4 升级测试。
 21. **下载 API 增强**：`/api/downloadfile` 支持 `HEAD` 与单段 `Range`；直传 R2 文件返回 `206`、`content-range` 和 `accept-ranges: bytes`，加密文件返回完整 `200` 且 `accept-ranges: none`；HEAD/Range 不计入下载次数。文档补充下载权限、响应头、Range 示例与 API Key 支持矩阵。
+22. **预签名下载直链**：新增 `/api/files/download-url`，为 R2 直传文件生成短期 GET URL；支持 API Key 与登录态，私有文件校验所有者；签名包含文件名和 Content-Type，默认 60 分钟有效，不经过 Worker，支持 R2 原生 Range，直链下载不计入 `downloads`。
 
 ## License
 

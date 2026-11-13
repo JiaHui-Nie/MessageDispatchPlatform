@@ -28,6 +28,8 @@ export interface Env {
   R2_SECRET_ACCESS_KEY?: string;
   /** 超过该大小（MB）的文件优先使用 R2 预签名直传，默认 20；0 表示全部直传。 */
   DIRECT_UPLOAD_THRESHOLD_MB?: string;
+  /** 预签名下载 URL 有效期（分钟），默认 60，最大 1440。 */
+  DOWNLOAD_URL_TTL_MINUTES?: string;
 }
 
 /** 每个请求的运行时上下文。 */
@@ -44,6 +46,7 @@ export interface AppContext {
   defaultStorageQuotaBytes: number;
   fileStorage: FileStorageMode;
   directUploadThresholdBytes: number;
+  downloadUrlTtlSeconds: number;
 }
 
 const MIN_SECRET_LENGTH = 16;
@@ -84,6 +87,7 @@ export function createContext(env: Env): AppContext {
     fileStorage: parseFileStorageMode(env.FILE_STORAGE),
     directUploadThresholdBytes:
       parsePositiveInt(env.DIRECT_UPLOAD_THRESHOLD_MB, 20, 0, 10_240) * 1024 * 1024,
+    downloadUrlTtlSeconds: parsePositiveInt(env.DOWNLOAD_URL_TTL_MINUTES, 60, 1, 1440) * 60,
   };
 }
 

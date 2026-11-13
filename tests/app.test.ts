@@ -1286,6 +1286,79 @@ describe('R2 预签名直传', () => {
     assert.equal(r2.objects.size, 1, '原对象不应被他人取走');
   });
 
+  it('生成预签名下载直链，公开/私有鉴权与 API Key 正确', async () => {
+    const r2 = new ShimR2();
+    const harness = createHarness(directEnv(r2));
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+    const bob = await createUser(harness, { username: 'bob' });
+
+    const bytes = new Uint8Array([10, 20, 30, 40, 50]);
+    const presign = await alice.client.post<Record<string, any>>('/api/files/presign', {
+      name: '公开文件.bin',
+      size: bytes.length,
+      content_type: 'application/octet-stream',
+      private: false,
+    });
+    const objectKey = new URL(presign.data.upload_url).pathname.slice(1);
+    r2.objects.set(objectKey, bytes);
+    const done = await alice.client.post<Record<string, any>>('/api/files/complete', {
+      file_id: presign.data.file_id,
+      name: '公开文件.bin',
+      content_type: 'application/octet-stream',
+      private: false,
+    });
+    const fileId = String(done.data.file_id);
+    const anonymous = new TestClient(harness.env);
+
+    const publicUrl = await anonymous.post<Record<string, any>>('/api/files/download-url', { file_id: fileId });
+    assert.equal(publicUrl.status, 200);
+    assert.equal(publicUrl.data.status, 200);
+    assert.equal(publicUrl.data.encrypted, false);
+    assert.equal(publicUrl.data.range_supported, true);
+    assert.equal(publicUrl.data.download_counted, false);
+    assert.equal(publicUrl.data.expires_in, 3600);
+    const signed = new URL(publicUrl.data.download_url);
+    assert.equal(signed.host, `test-bucket.${'a'.repeat(32)}.r2.cloudflarestorage.com`);
+    assert.equal(signed.searchParams.get('X-Amz-Expires'), '3600');
+    assert.equal(signed.searchParams.get('X-Amz-SignedHeaders'), 'host');
+    assert.ok(signed.searchParams.get('X-Amz-Signature'));
+    assert.match(String(signed.searchParams.get('response-content-disposition')), /^attachment;/);
+    assert.equal(signed.searchParams.get('response-content-type'), 'application/octet-stream');
+
+    const aliceKey = await alice.client.post<{ api_key: { key: string } }>('/api/apikeys/create', {
+      name: 'download-url',
+    });
+    const byKey = await anonymous.post<Record<string, any>>('/api/files/download-url', {
+      file_id: fileId,
+      api_key: aliceKey.data.api_key.key,
+    });
+    assert.equal(byKey.status, 200);
+
+    await alice.client.post('/api/files/visibility', { id: fileId, private: true });
+    const anonymousPrivate = await anonymous.post('/api/files/download-url', { file_id: fileId });
+    assert.equal(anonymousPrivate.status, 403);
+    assert.equal(anonymousPrivate.data.error, 'api_key_required');
+    const bobSession = await bob.client.post('/api/files/download-url', { file_id: fileId });
+    assert.equal(bobSession.status, 403);
+    const bobKey = await bob.client.post<{ api_key: { key: string } }>('/api/apikeys/create', { name: 'bob' });
+    const bobKeyCall = await anonymous.post('/api/files/download-url', {
+      file_id: fileId,
+      api_key: bobKey.data.api_key.key,
+    });
+    assert.equal(bobKeyCall.status, 403);
+    assert.equal(bobKeyCall.data.error, 'invalid_api_key');
+    const ownerPrivate = await alice.client.post('/api/files/download-url', { file_id: fileId });
+    assert.equal(ownerPrivate.status, 200);
+
+    const encrypted = await alice.client.upload<Record<string, any>>('/api/uploadfile', textFile('encrypted'));
+    const unavailable = await alice.client.post('/api/files/download-url', {
+      file_id: encrypted.data.file_id,
+    });
+    assert.equal(unavailable.status, 400);
+    assert.equal(unavailable.data.error, 'presigned_download_unavailable');
+  });
+
   it('未配置 S3 凭据或使用 D1 后端时不提供直传', async () => {
     const r2 = new ShimR2();
     const withoutCredentials = createHarness({ FILES: r2 as unknown as R2Bucket, FILE_STORAGE: 'r2' });

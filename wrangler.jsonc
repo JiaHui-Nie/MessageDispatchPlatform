@@ -42,6 +42,8 @@
     "DEFAULT_STORAGE_QUOTA_MB": "50",
     // 超过该大小（MB）的文件使用 R2 预签名直传；0 表示全部直传。
     "DIRECT_UPLOAD_THRESHOLD_MB": "20",
+    // 预签名下载 URL 有效期（分钟），默认 60，最大 1440。
+    "DOWNLOAD_URL_TTL_MINUTES": "60",
     // 文件存储默认后端：auto（有 R2 绑定则用 R2，否则 D1）/ d1 / r2。
     // 管理后台的「文件存储后端」设置优先于这里的默认值。
     "FILE_STORAGE": "auto"

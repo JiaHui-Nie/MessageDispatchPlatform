@@ -10,3 +10,6 @@ JWT_SECRET=replace-with-a-long-random-secret-at-least-32-chars
 # R2_BUCKET_NAME=
 # R2_ACCESS_KEY_ID=
 # R2_SECRET_ACCESS_KEY=
+
+# 可选：预签名下载 URL 有效期（分钟，默认 60）
+# DOWNLOAD_URL_TTL_MINUTES=60
