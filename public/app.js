@@ -428,7 +428,6 @@ function renderLogin() {
           <button class="btn btn-primary btn-block" type="submit">登录</button>
         </form>
         <p class="auth-foot">还没有账号？<a href="#/register">使用注册码注册</a></p>
-        <p class="auth-note">首次部署的管理员账号固定为 <strong>admin</strong>，请先在初始化页面设置密码。</p>
         ${PROJECT_FOOTER}
       </div>
     </div>`;
@@ -992,8 +991,6 @@ VIEWS.files = {
 
     const files = data.files ?? [];
     const storage = data.storage ?? { quota: 0, used: 0, remaining: 0, percent: 0, file_count: 0 };
-    const maxBytes = data.limits?.max_file_size ?? 10 * 1024 * 1024;
-    const maxMb = Math.round(maxBytes / (1024 * 1024));
     const quotaLevel = storage.percent >= 90 ? 'danger' : storage.percent >= 70 ? 'warning' : '';
     const backendLabel =
       data.storage_backend === 'r2' ? 'R2 存储' : data.storage_backend === 'd1' ? 'D1 存储' : '存储未配置';
@@ -1033,7 +1030,6 @@ VIEWS.files = {
         </div>
         <div class="page-actions">
           <span class="badge ${data.storage_backend === 'r2' ? 'badge-primary' : ''}">${icon('hardDrive')}${backendLabel}</span>
-          <span class="badge">单文件 ≤ ${maxMb} MB</span>
         </div>
       </header>
 
@@ -1051,7 +1047,7 @@ VIEWS.files = {
           <div class="dropzone" data-dropzone role="button" tabindex="0" aria-label="上传文件">
             ${icon('upload')}
             <strong>点击选择文件，或拖拽到这里上传</strong>
-            <span>文件会以 AES-256-GCM 加密后存入 D1，单个文件最大 ${maxMb} MB</span>
+            <span>文件会以 AES-256-GCM 加密后存储，大小只受剩余空间限制</span>
             <input type="file" multiple data-file-input hidden />
           </div>
           <label class="checkbox mt-3">
@@ -1100,10 +1096,6 @@ VIEWS.files = {
       hideError(errorBox);
       const results = [];
       for (const file of queue) {
-        if (file.size > maxBytes) {
-          showError(errorBox, `${file.name} 超过 ${maxMb} MB 限制`);
-          continue;
-        }
         const form = new FormData();
         form.append('file', file);
         if (privateUpload.checked) {

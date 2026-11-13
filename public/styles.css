@@ -283,16 +283,6 @@ button {
   text-align: center;
 }
 
-.auth-note {
-  margin-top: 14px;
-  padding: 10px 12px;
-  border-radius: var(--radius-sm);
-  background: var(--surface-2);
-  color: var(--text-muted);
-  font-size: 12px;
-  line-height: 1.6;
-}
-
 .auth-project {
   margin-top: 18px;
   padding-top: 14px;

@@ -1,6 +1,6 @@
 import { allRows, firstRow, runStatement } from '../db/d1.ts';
 import { decryptBytes, decryptString, encryptBytes, encryptString } from '../lib/crypto.ts';
-import { ApiError, DecryptionError, notFound, payloadTooLarge, badRequest } from '../lib/errors.ts';
+import { ApiError, DecryptionError, notFound, payloadTooLarge } from '../lib/errors.ts';
 import { randomHex } from '../lib/encoding.ts';
 import { formatTime, nowIso } from '../lib/time.ts';
 import type { AppContext, FileStorageMode } from '../env.ts';
@@ -16,7 +16,6 @@ import type { AppContext, FileStorageMode } from '../env.ts';
  */
 export const CHUNK_SIZE = 900_000;
 export const MAX_FILES_PER_USER = 1_000;
-export const MAX_FILE_SIZE_MB = 20;
 
 export type FileBackend = 'd1' | 'r2';
 
@@ -425,17 +424,4 @@ export async function deleteR2FilesForUser(ctx: AppContext, userId: number): Pro
     return;
   }
   await ctx.files.delete(rows.map((row) => r2Key(row.id)));
-}
-
-export function assertFileSizeLimit(ctx: AppContext, size: number): void {
-  if (size <= 0) {
-    throw badRequest('empty_file', '文件内容为空');
-  }
-  if (size > ctx.maxFileSizeBytes) {
-    throw payloadTooLarge(
-      'file_too_large',
-      `单个文件不能超过 ${Math.round(ctx.maxFileSizeBytes / (1024 * 1024))} MB`,
-      { max_size: ctx.maxFileSizeBytes, size },
-    );
-  }
 }

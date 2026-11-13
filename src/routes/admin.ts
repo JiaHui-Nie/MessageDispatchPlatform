@@ -85,7 +85,6 @@ export async function storageSettings(ctx: AppContext, request: Request, params:
     default_quota_mb: Math.round((defaultQuota / MB) * 10) / 10,
     total_used: platformStorage.used,
     file_count: platformStorage.files,
-    max_file_size: ctx.maxFileSizeBytes,
     storage_setting: storage.setting,
     storage_backend: storage.backend,
     r2_available: storage.r2_available,

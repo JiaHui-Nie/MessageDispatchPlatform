@@ -63,7 +63,7 @@ export function renderDocs(origin) {
        response: `{
   "status": 200,
   "app": "信息分发平台",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "secret_configured": true,
   "database": "ok",
   "schema_version": 3,
@@ -250,7 +250,7 @@ curl -X POST '${base}/api/setinformation?api_key=mdp_xxx' ...
          ['private', false, '是否需要 API Key 才能下载，默认 <code>false</code>'],
          ['name', false, '覆盖文件名（最多 180 字符）'],
        ],
-       note: '单文件上限由 <code>MAX_FILE_SIZE_MB</code> 控制（默认 10 MB），且不能超过剩余配额。',
+       note: '文件大小只受用户剩余存储空间限制；超出配额时返回 <code>413 storage_quota_exceeded</code>。',
        example: `# multipart
 curl -X POST '${base}/api/uploadfile?api_key=mdp_xxx' \\
   -F 'file=@./report.pdf' \\
@@ -375,14 +375,14 @@ x-api-status: 200
         <tr><td>403</td><td><code>api_key_required</code></td><td>私有信息/文件需要所有者 API Key</td></tr>
         <tr><td>403</td><td><code>feedback_disabled</code> / <code>admin_required</code></td><td>反馈未开启 / 需要管理员</td></tr>
         <tr><td>404</td><td><code>not_found</code> / <code>file_not_found</code></td><td>资源不存在</td></tr>
-        <tr><td>413</td><td><code>file_too_large</code> / <code>storage_quota_exceeded</code></td><td>文件超限或空间不足</td></tr>
+        <tr><td>413</td><td><code>storage_quota_exceeded</code></td><td>剩余存储空间不足</td></tr>
         <tr><td>429</td><td><code>rate_limited</code></td><td>触发限流，响应带 <code>Retry-After</code></td></tr>
       </tbody>
     </table></div>
     <h3>配额与大小</h3>
     <ul class="docs-list">
       <li>默认存储空间：50 MB/用户（可通过 <code>DEFAULT_STORAGE_QUOTA_MB</code> 或管理后台调整）</li>
-      <li>单文件上限：10 MB（<code>MAX_FILE_SIZE_MB</code>，最大 20）</li>
+      <li>单文件大小：不设独立上限，只受用户剩余存储空间限制</li>
       <li>固定信息：最多 500 条/用户，单条 value 最多 100,000 字符</li>
       <li>反馈：单条消息最多 10,000 字符，每个会话最多 500 条消息</li>
       <li>API Key：最多 20 个/用户；注册码：最多 100 次使用</li>

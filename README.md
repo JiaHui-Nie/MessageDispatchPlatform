@@ -195,7 +195,7 @@ pnpm db:migrate:local
 - 想要把已有 D1 文件迁移到 R2，需要重新上传（加密数据无法在不下载的情况下直接搬运）。
 - R2 文件需要 `FILES` 绑定才能下载或删除；如果临时移除绑定，这些文件会返回 `503`，恢复绑定即可。
 - R2 需要在 Cloudflare 账户中启用（免费额度为 10 GB 存储/月，开通时可能需要添加付款方式）；不启用 R2 时继续用 D1 即可。
-- 两种后端都受 `MAX_FILE_SIZE_MB` 与用户配额限制，前端文件列表会标注每个文件是 `D1` 还是 `R2`。
+- 两种后端都只受用户配额限制，单个文件不设独立大小上限；前端文件列表会标注每个文件是 `D1` 还是 `R2`。
 
 ## 界面说明
 
@@ -415,7 +415,7 @@ curl -X POST "$BASE/api/uploadfile?api_key=$KEY" \
 }
 ```
 
-文件内容以 AES-256-GCM 加密后存入所选后端：D1 按 900 KB 分块，R2 写入单个对象。默认后端为 `auto`（有 R2 绑定用 R2，否则 D1），可在管理后台切换；返回的 `backend` 表示本次文件实际使用的后端。超出配额返回 `413 storage_quota_exceeded`，超出单文件上限返回 `413 file_too_large`。
+文件内容以 AES-256-GCM 加密后存入所选后端：D1 按 900 KB 分块，R2 写入单个对象。默认后端为 `auto`（有 R2 绑定用 R2，否则 D1），可在管理后台切换；返回的 `backend` 表示本次文件实际使用的后端。单个文件不设独立大小上限，只受剩余配额限制；超出配额返回 `413 storage_quota_exceeded`。
 
 #### ⑩ 下载文件
 
@@ -476,7 +476,7 @@ POST /api/deletefile
 | `POST /api/feedback/delete` | `session_id` | 删除会话 |
 | `POST /api/feedback/settings` | `enabled`、`intro` | 开启/关闭反馈、设置公开页说明 |
 | `POST /api/public/profile` | `user_name` | 公开页资料（是否开放、显示名、说明） |
-| `POST /api/files/list` | — | 自己的文件列表、配额、上限与当前存储后端 |
+| `POST /api/files/list` | — | 自己的文件列表、配额与当前存储后端 |
 | `POST /api/files/visibility` | `id`、`private` | 切换文件公开/私有 |
 | `POST /api/files/delete` | `id` | 删除自己的文件 |
 | `POST /api/overview` | — | 总览统计、存储用量与最近反馈 |
@@ -502,7 +502,7 @@ GET /api/health
 ```
 
 ```json
-{ "status": 200, "app": "信息分发平台", "version": "1.2.0", "secret_configured": true,
+{ "status": 200, "app": "信息分发平台", "version": "1.2.1", "secret_configured": true,
   "database": "ok", "schema_version": 3, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
 ```
 
@@ -525,7 +525,6 @@ GET /api/health
 | 403 | `cross_origin_denied` | 跨站请求被拒绝 |
 | 404 | `not_found` / `feedback_not_found` / `file_not_found` | 资源不存在 |
 | 409 | `already_setup` / `username_taken` | 已初始化 / 用户名被占用 |
-| 413 | `file_too_large` | 超过单文件大小上限 |
 | 413 | `storage_quota_exceeded` | 剩余存储空间不足 |
 | 429 | `rate_limited` | 触发限流，响应带 `Retry-After` |
 | 500 | `missing_secret` / `decryption_failed` | 服务端密钥缺失或密钥不一致 |
@@ -607,7 +606,6 @@ curl -X POST "$BASE/api/sendfeedback" \
 | `DISPLAY_TZ` | 否 | `Asia/Shanghai` | 时间展示时区（IANA） |
 | `SESSION_TTL_HOURS` | 否 | `168` | 登录有效期（1–2160 小时） |
 | `PASSWORD_ITERATIONS` | 否 | `100000` | PBKDF2 迭代次数（10000–500000） |
-| `MAX_FILE_SIZE_MB` | 否 | `10` | 单文件大小上限（1–20 MB） |
 | `DEFAULT_STORAGE_QUOTA_MB` | 否 | `50` | 新用户默认存储空间（1–10240 MB，管理后台可覆盖） |
 | `FILE_STORAGE` | 否 | `auto` | 文件存储默认后端：`auto` / `d1` / `r2`，管理后台设置优先 |
 | `RATE_LIMIT_DISABLED` | 否 | — | 设为 `1` 关闭限流（仅用于自动化测试） |
@@ -645,7 +643,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 ## 测试
 
 ```bash
-pnpm test        # 31 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2 后端、配额、越权、限流、管理后台
+pnpm test        # 32 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2 后端、配额、越权、限流、管理后台
 pnpm typecheck
 pnpm check       # 以上两项
 ```
@@ -670,7 +668,7 @@ pnpm check       # 以上两项
 注册码只保存哈希，生成时展示一次；丢失后请吊销并重新生成。
 
 **Q：文件存在哪里？有大小限制吗？**
-文件内容加密后按 900 KB 分块存入 D1（`file_chunks`）。单文件默认 10 MB（`MAX_FILE_SIZE_MB`），每用户默认 50 MB（`DEFAULT_STORAGE_QUOTA_MB`），管理员可在「管理后台」调整。
+文件内容加密后按 900 KB 分块存入 D1（`file_chunks`）。单个文件不设独立大小上限，只受用户剩余空间限制；每用户默认 50 MB（`DEFAULT_STORAGE_QUOTA_MB`），管理员可在「管理后台」调整。
 
 **Q：私有文件怎么下载？**
 在链接后追加 `&api_key=mdp_xxx`，或使用 `X-API-Key: mdp_xxx` 请求头，或由文件所有者登录后访问。公开文件无需凭据。

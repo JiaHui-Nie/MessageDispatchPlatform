@@ -1,5 +1,4 @@
 import {
-  assertFileSizeLimit,
   claimStorage,
   countFiles,
   deleteStoredFile,
@@ -106,7 +105,6 @@ export async function uploadFile(ctx: AppContext, request: Request, query: Param
   if (body.bytes.length === 0) {
     throw badRequest('empty_file', '文件内容为空');
   }
-  assertFileSizeLimit(ctx, body.bytes.length);
   if ((await countFiles(ctx.db, actor.user.id)) >= MAX_FILES_PER_USER) {
     throw badRequest('too_many_files', `每个账号最多保存 ${MAX_FILES_PER_USER} 个文件`);
   }
@@ -149,7 +147,6 @@ export async function uploadFile(ctx: AppContext, request: Request, query: Param
     url_path: `/api/downloadfile?id=${encodeURIComponent(fileId)}`,
     download_url: `${origin}/api/downloadfile?id=${encodeURIComponent(fileId)}`,
     storage,
-    limits: { max_file_size: ctx.maxFileSizeBytes, max_files: MAX_FILES_PER_USER },
   });
 }
 
@@ -248,7 +245,6 @@ export async function listFilesRoute(ctx: AppContext, request: Request): Promise
     storage_setting: storageStatus.setting,
     storage_backend: storageStatus.backend,
     r2_available: storageStatus.r2_available,
-    limits: { max_file_size: ctx.maxFileSizeBytes, max_files: MAX_FILES_PER_USER },
   });
 }
 

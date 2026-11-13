@@ -768,7 +768,6 @@ describe('文件存储', () => {
     assert.equal(list.data.storage.used, Buffer.byteLength(content));
     assert.equal(list.data.storage.quota, 50 * MB);
     assert.equal(list.data.storage.file_count, 1);
-    assert.equal(list.data.limits.max_file_size, 10 * MB);
 
     const deleted = await alice.client.post<Record<string, any>>('/api/deletefile', { file_id: fileId });
     assert.equal(deleted.status, 200);
@@ -779,6 +778,20 @@ describe('文件存储', () => {
     assert.equal(Number(chunks.total), 0);
     const gone = await new TestClient(harness.env).download(String(upload.data.url_path));
     assert.equal(gone.status, 404);
+  });
+
+  it('单个文件不设大小上限，只受剩余配额限制', async () => {
+    const harness = createHarness();
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+
+    const upload = await alice.client.upload<Record<string, any>>('/api/uploadfile', byteFile(11 * MB, 'big.bin'));
+    assert.equal(upload.status, 200, '11 MB 文件应可直接上传');
+    assert.equal(upload.data.size, 11 * MB);
+
+    const list = await alice.client.post<Record<string, any>>('/api/files/list');
+    assert.equal(list.data.storage.used, 11 * MB);
+    assert.equal(list.data.limits, undefined, '不再返回单文件大小限制');
   });
 
   it('私有文件需要所有者 api_key 或登录态才能下载', async () => {
@@ -888,7 +901,7 @@ describe('文件存储', () => {
     assert.equal(denied.data.error, 'admin_required');
   });
 
-  it('支持原始二进制上传、中文文件名与大小校验', async () => {
+  it('支持原始二进制上传与中文文件名', async () => {
     const harness = createHarness();
     await setupAdmin(harness);
     const alice = await createUser(harness, { username: 'alice' });
@@ -917,13 +930,6 @@ describe('文件存储', () => {
     const noFile = await alice.client.upload('/api/uploadfile', new FormData());
     assert.equal(noFile.status, 400);
     assert.equal(noFile.data.error, 'missing_file');
-
-    const small = createHarness({ MAX_FILE_SIZE_MB: '1' });
-    await setupAdmin(small);
-    const smallUser = await createUser(small, { username: 'alice' });
-    const oversize = await smallUser.client.upload('/api/uploadfile', byteFile(MB + 10));
-    assert.equal(oversize.status, 413);
-    assert.equal(oversize.data.error, 'file_too_large');
   });
 
   it('删除用户会清理文件、分块与配额记录', async () => {

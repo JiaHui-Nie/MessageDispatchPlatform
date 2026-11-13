@@ -17,8 +17,6 @@ export interface Env {
   SESSION_TTL_HOURS?: string;
   PASSWORD_ITERATIONS?: string;
   RATE_LIMIT_DISABLED?: string;
-  /** 单个文件大小上限（MB），默认 10，最大 20。 */
-  MAX_FILE_SIZE_MB?: string;
   /** 新用户默认存储空间（MB），默认 50，最大 10240。 */
   DEFAULT_STORAGE_QUOTA_MB?: string;
   /** 文件存储后端默认值：auto / d1 / r2，管理后台设置优先。 */
@@ -36,7 +34,6 @@ export interface AppContext {
   passwordIterations: number;
   sessionTtlSeconds: number;
   rateLimitDisabled: boolean;
-  maxFileSizeBytes: number;
   defaultStorageQuotaBytes: number;
   fileStorage: FileStorageMode;
 }
@@ -75,7 +72,6 @@ export function createContext(env: Env): AppContext {
     passwordIterations: clampIterations(parsePositiveInt(env.PASSWORD_ITERATIONS, 100_000, 10_000, 500_000)),
     sessionTtlSeconds: parsePositiveInt(env.SESSION_TTL_HOURS, 168, 1, 24 * 90) * 3600,
     rateLimitDisabled: (env.RATE_LIMIT_DISABLED ?? '').trim() === '1',
-    maxFileSizeBytes: parsePositiveInt(env.MAX_FILE_SIZE_MB, 10, 1, 20) * 1024 * 1024,
     defaultStorageQuotaBytes: parsePositiveInt(env.DEFAULT_STORAGE_QUOTA_MB, 50, 1, 10_240) * 1024 * 1024,
     fileStorage: parseFileStorageMode(env.FILE_STORAGE),
   };

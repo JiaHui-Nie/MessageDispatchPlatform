@@ -39,7 +39,6 @@
     "DISPLAY_TZ": "Asia/Shanghai",
     "SESSION_TTL_HOURS": "168",
     "PASSWORD_ITERATIONS": "100000",
-    "MAX_FILE_SIZE_MB": "10",
     "DEFAULT_STORAGE_QUOTA_MB": "50",
     // 文件存储默认后端：auto（有 R2 绑定则用 R2，否则 D1）/ d1 / r2。
     // 管理后台的「文件存储后端」设置优先于这里的默认值。
