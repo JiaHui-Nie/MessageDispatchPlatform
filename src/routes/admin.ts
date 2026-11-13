@@ -1,7 +1,7 @@
 import { getAdminStats } from '../data/stats.ts';
 import { countAdmins, deleteUser, findUserById, listUsersWithStats, updateUserPassword } from '../data/users.ts';
 import { createRegistrationCode, listRegistrationCodes, revokeRegistrationCode } from '../data/registration.ts';
-import { getDefaultQuota, getPlatformStorage, setDefaultQuota, setUserQuota } from '../data/storage.ts';
+import { getDefaultQuota, getFileStorageStatus, getPlatformStorage, setDefaultQuota, setStorageSetting, setUserQuota } from '../data/storage.ts';
 import { requireAdmin } from '../auth/session.ts';
 import { issueSessionToken, buildSessionCookie } from '../auth/session.ts';
 import type { AppContext } from '../env.ts';
@@ -14,7 +14,15 @@ const MB = 1024 * 1024;
 
 export async function stats(ctx: AppContext, request: Request): Promise<Response> {
   await requireAdmin(ctx, request);
-  return ok({ stats: await getAdminStats(ctx) });
+  const [stats, storage] = await Promise.all([getAdminStats(ctx), getFileStorageStatus(ctx)]);
+  return ok({
+    stats,
+    storage: {
+      storage_setting: storage.setting,
+      storage_backend: storage.backend,
+      r2_available: storage.r2_available,
+    },
+  });
 }
 
 export async function codesCreate(ctx: AppContext, request: Request, params: Params): Promise<Response> {
@@ -47,20 +55,40 @@ export async function usersList(ctx: AppContext, request: Request): Promise<Resp
   });
 }
 
-/** 平台默认存储空间与总用量（管理员）。 */
+/** 平台默认存储空间与总用量（管理员）；可通过 backend 切换 D1 / R2。 */
 export async function storageSettings(ctx: AppContext, request: Request, params: Params): Promise<Response> {
   await requireAdmin(ctx, request);
   if (params.default_quota_mb !== undefined) {
     const quotaMb = intParam(params, 'default_quota_mb', { min: 0, max: 10_240, label: '默认存储空间' });
     await setDefaultQuota(ctx, quotaMb * MB);
   }
-  const [defaultQuota, platformStorage] = await Promise.all([getDefaultQuota(ctx), getPlatformStorage(ctx.db)]);
+  if (params.backend !== undefined) {
+    const backend = params.backend.trim().toLowerCase();
+    if (backend !== 'auto' && backend !== 'd1' && backend !== 'r2') {
+      throw badRequest('invalid_backend', 'backend 只能是 auto、d1 或 r2');
+    }
+    if (backend === 'r2' && !ctx.files) {
+      throw badRequest(
+        'r2_unavailable',
+        '当前 Worker 未绑定 R2。请先在 wrangler.jsonc 添加 r2_buckets 绑定（FILES）并重新部署。',
+      );
+    }
+    await setStorageSetting(ctx, backend);
+  }
+  const [defaultQuota, platformStorage, storage] = await Promise.all([
+    getDefaultQuota(ctx),
+    getPlatformStorage(ctx.db),
+    getFileStorageStatus(ctx),
+  ]);
   return ok({
     default_quota: defaultQuota,
     default_quota_mb: Math.round((defaultQuota / MB) * 10) / 10,
     total_used: platformStorage.used,
     file_count: platformStorage.files,
     max_file_size: ctx.maxFileSizeBytes,
+    storage_setting: storage.setting,
+    storage_backend: storage.backend,
+    r2_available: storage.r2_available,
   });
 }
 
@@ -94,7 +122,7 @@ export async function usersDelete(ctx: AppContext, request: Request, params: Par
   if (target.role === 'admin' && (await countAdmins(ctx.db)) <= 1) {
     throw badRequest('last_admin', '至少需要保留一个管理员账号');
   }
-  await deleteUser(ctx.db, id);
+  await deleteUser(ctx, id);
   return ok({ id, deleted: true, username: target.username });
 }
 

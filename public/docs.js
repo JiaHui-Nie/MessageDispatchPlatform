@@ -60,10 +60,10 @@ export function renderDocs(origin) {
        response: `{
   "status": 200,
   "app": "信息分发平台",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "secret_configured": true,
   "database": "ok",
-  "schema_version": 2,
+  "schema_version": 3,
   "needs_setup": false
 }`,
      })}
@@ -233,6 +233,7 @@ curl -X POST '${base}/api/setinformation?api_key=mdp_xxx' ...
     '文件存储',
     `<div class="docs-cards">
        <div class="docs-card"><h4>加密存储</h4><p>文件先以 AES-256-GCM 加密，再按 900 KB 分块存入 D1；文件名同样加密。</p></div>
+       <div class="docs-card"><h4>可选 R2</h4><p>默认使用 D1；绑定 R2 后可在管理后台切换后端，新文件使用所选后端，旧文件仍可正常下载。</p></div>
        <div class="docs-card"><h4>配额</h4><p>每个用户有独立空间，默认 50 MB，管理员可以单独调整。</p></div>
        <div class="docs-card"><h4>访问控制</h4><p>每个文件可单独设置“私有”，私有文件必须提供所有者的 API Key 或登录态才能下载。</p></div>
      </div>
@@ -264,6 +265,7 @@ curl -X POST '${base}/api/uploadfile?api_key=mdp_xxx' \\
   "size": 20480,
   "content_type": "application/pdf",
   "private": true,
+  "backend": "d1",
   "download_url": "${base}/api/downloadfile?id=8b1f…",
   "storage": { "quota": 52428800, "used": 20480, "remaining": 52408320, "percent": 0, "file_count": 1 }
 }`,
@@ -302,7 +304,7 @@ x-api-status: 200
      ${endpoint({
        path: '/api/files/list',
        desc: '当前用户的文件列表与配额（需要登录）。',
-       response: `{ "status": 200, "files": [ { "id": "8b1f…", "name": "report.pdf", "size": 20480, "private": true, "url_path": "/api/downloadfile?id=8b1f…" } ], "storage": { "quota": 52428800, "used": 20480 } }`,
+       response: `{ "status": 200, "files": [ { "id": "8b1f…", "name": "report.pdf", "size": 20480, "private": true, "backend": "d1", "url_path": "/api/downloadfile?id=8b1f…" } ], "storage": { "quota": 52428800, "used": 20480 }, "storage_backend": "d1", "storage_setting": "auto", "r2_available": false }`,
      })}
      ${endpoint({
        path: '/api/files/visibility',
@@ -336,9 +338,12 @@ x-api-status: 200
      })}
      ${endpoint({
        path: '/api/admin/storage',
-       desc: '查看/设置新用户的默认存储空间（只影响之后注册的用户）。',
-       params: [['default_quota_mb', false, '默认空间（MB），0-10240；省略时只查询']],
-       response: `{ "status": 200, "default_quota": 52428800, "default_quota_mb": 50, "total_used": 204800, "file_count": 5 }`,
+       desc: '查看/设置新用户默认存储空间与文件存储后端（只影响之后注册的用户与新文件）。',
+       params: [
+         ['default_quota_mb', false, '默认空间（MB），0-10240；省略时只查询'],
+         ['backend', false, '文件后端：<code>auto</code> / <code>d1</code> / <code>r2</code>；选 r2 前需绑定 FILES'],
+       ],
+       response: `{ "status": 200, "default_quota": 52428800, "default_quota_mb": 50, "total_used": 204800, "file_count": 5, "storage_setting": "auto", "storage_backend": "d1", "r2_available": false }`,
      })}
      ${endpoint({
        path: '/api/admin/users/storage',

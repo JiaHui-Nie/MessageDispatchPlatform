@@ -995,6 +995,8 @@ VIEWS.files = {
     const maxBytes = data.limits?.max_file_size ?? 10 * 1024 * 1024;
     const maxMb = Math.round(maxBytes / (1024 * 1024));
     const quotaLevel = storage.percent >= 90 ? 'danger' : storage.percent >= 70 ? 'warning' : '';
+    const backendLabel =
+      data.storage_backend === 'r2' ? 'R2 存储' : data.storage_backend === 'd1' ? 'D1 存储' : '存储未配置';
 
     const rows = files
       .map(
@@ -1002,7 +1004,7 @@ VIEWS.files = {
         <tr>
           <td>
             <div class="file-name">${icon('file')}<span>${esc(file.name)}</span></div>
-            <div class="file-meta">${esc(file.content_type)} · ${formatBytes(file.size)}</div>
+            <div class="file-meta">${esc(file.content_type)} · ${formatBytes(file.size)} · ${file.backend === 'r2' ? 'R2' : 'D1'}</div>
           </td>
           <td>${
             file.private
@@ -1030,7 +1032,8 @@ VIEWS.files = {
           <p class="page-subtitle">上传文件并生成下载链接；文件加密存储，每个文件可单独设置是否需要 API Key。</p>
         </div>
         <div class="page-actions">
-          <span class="badge">${icon('hardDrive')}单文件 ≤ ${maxMb} MB</span>
+          <span class="badge ${data.storage_backend === 'r2' ? 'badge-primary' : ''}">${icon('hardDrive')}${backendLabel}</span>
+          <span class="badge">单文件 ≤ ${maxMb} MB</span>
         </div>
       </header>
 
@@ -1043,6 +1046,7 @@ VIEWS.files = {
           <span class="badge ${quotaLevel === 'danger' ? 'badge-danger' : quotaLevel === 'warning' ? 'badge-warning' : 'badge-primary'}">${storage.percent}%</span>
         </div>
         <div class="card-body">
+          ${data.storage_backend ? '' : alertBox('warning', '当前选择 R2 存储但未绑定 FILES，上传会失败。请在 wrangler.jsonc 添加 r2_buckets 后重新部署，或在管理后台切换回 D1。')}
           <progress class="quota-bar ${quotaLevel}" value="${storage.used}" max="${storage.quota || 1}"></progress>
           <div class="dropzone" data-dropzone role="button" tabindex="0" aria-label="上传文件">
             ${icon('upload')}
@@ -1682,6 +1686,7 @@ VIEWS.admin = {
     let stats;
     let codes;
     let users;
+    let storageInfo = { storage_setting: 'auto', storage_backend: null, r2_available: false };
     try {
       const [statsData, codesData, usersData] = await Promise.all([
         api('/api/admin/stats'),
@@ -1689,6 +1694,7 @@ VIEWS.admin = {
         api('/api/admin/users/list'),
       ]);
       stats = statsData.stats;
+      storageInfo = statsData.storage ?? storageInfo;
       codes = codesData.registration_codes;
       users = usersData.users;
     } catch (error) {
@@ -1860,7 +1866,12 @@ VIEWS.admin = {
             <h2 class="card-title">${icon('hardDrive')}文件存储</h2>
             <p class="card-subtitle">默认空间只影响之后新注册的用户；已有用户请在下方单独调整</p>
           </div>
-          <span class="badge">${formatNumber(stats.files)} 个文件 · ${formatBytes(stats.storage_used)}</span>
+          <div class="pill-row">
+            <span class="badge ${storageInfo.storage_backend === 'r2' ? 'badge-primary' : ''}">
+              ${storageInfo.storage_backend === 'r2' ? 'R2 存储' : storageInfo.storage_backend === 'd1' ? 'D1 存储' : '未配置'}
+            </span>
+            <span class="badge">${formatNumber(stats.files)} 个文件 · ${formatBytes(stats.storage_used)}</span>
+          </div>
         </div>
         <div class="card-body">
           <form class="form" id="storage-form" novalidate>
@@ -1870,10 +1881,19 @@ VIEWS.admin = {
                 <input class="input" name="default_quota_mb" type="number" min="0" max="10240" value="${Math.round(stats.default_storage_quota / (1024 * 1024))}" />
                 <small class="field-hint">0 表示新用户不能上传文件；修改后不影响已注册用户。</small>
               </label>
+              <label class="field">
+                <span>文件存储后端</span>
+                <select class="select" name="backend">
+                  <option value="auto" ${storageInfo.storage_setting === 'auto' ? 'selected' : ''}>自动（优先 R2，未绑定时用 D1）</option>
+                  <option value="d1" ${storageInfo.storage_setting === 'd1' ? 'selected' : ''}>D1（内置存储）</option>
+                  <option value="r2" ${storageInfo.storage_setting === 'r2' ? 'selected' : ''} ${storageInfo.r2_available ? '' : 'disabled'}>R2（需要 FILES 绑定）</option>
+                </select>
+                <small class="field-hint">${storageInfo.r2_available ? 'R2 已绑定。切换只影响新上传的文件，旧文件仍按各自后端读取。' : '当前未绑定 R2，只能使用 D1。在 wrangler.jsonc 添加 r2_buckets 后重新部署即可启用。'}</small>
+              </label>
             </div>
             <div class="alert alert-error" data-error hidden></div>
             <div class="page-actions">
-              <button class="btn btn-primary" type="submit">保存默认空间</button>
+              <button class="btn btn-primary" type="submit">保存存储设置</button>
             </div>
           </form>
         </div>
@@ -1917,8 +1937,11 @@ VIEWS.admin = {
 
     onSubmit(el.querySelector('#storage-form'), async () => {
       const values = formValues(el.querySelector('#storage-form'));
-      await api('/api/admin/storage', { default_quota_mb: Number(values.default_quota_mb || 0) });
-      toast('默认存储空间已更新', 'success');
+      await api('/api/admin/storage', {
+        default_quota_mb: Number(values.default_quota_mb || 0),
+        backend: values.backend,
+      });
+      toast('存储设置已更新', 'success');
       VIEWS.admin.render(el);
     });
 

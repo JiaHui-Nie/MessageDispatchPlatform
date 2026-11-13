@@ -1,6 +1,6 @@
 // 此文件由 scripts/gen-schema.mjs 自动生成，请勿手动修改。
 // 来源：migrations/0001_init.sql（修改后运行 pnpm run gen:schema）。
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `-- Migration number: 0001 	 init schema
@@ -119,5 +119,12 @@ INSERT INTO user_storage (user_id, quota, used, updated_at)
 SELECT id, 52428800, 0, STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') FROM users
 WHERE id NOT IN (SELECT user_id FROM user_storage);`,
   `INSERT INTO meta (key, value, updated_at) VALUES ('schema_version', '2', STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;`,
+  `-- Migration number: 0003 	 file storage backend
+-- 记录每个文件实际使用的存储后端：'d1'（默认）或 'r2'。
+-- 切换后端只影响新上传的文件，旧文件继续按各自记录读取。
+
+ALTER TABLE files ADD COLUMN storage TEXT NOT NULL DEFAULT 'd1';`,
+  `INSERT INTO meta (key, value, updated_at) VALUES ('schema_version', '3', STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;`,
 ];

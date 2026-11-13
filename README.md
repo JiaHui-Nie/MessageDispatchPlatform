@@ -17,6 +17,7 @@
 - [通过 GitHub 连接 Cloudflare Workers](#通过-github-连接-cloudflare-workersworkers-builds)
 - [手动部署（CLI）](#手动部署cli)
 - [本地开发](#本地开发)
+- [文件存储后端（D1 / R2）](#文件存储后端d1--r2)
 - [界面说明](#界面说明)
 - [API 文档](#api-文档)
 - [安全设计](#安全设计)
@@ -34,7 +35,7 @@
 
 - **固定信息分发**：按 `key` 读写信息，公开信息可直接读取，私有信息需要 API Key。
 - **反馈对话**：访客无需注册即可提交反馈，拿到 `session_id` 后可持续追加消息；接收者在后台回复，支持未读/已读、筛选、删除。
-- **文件存储**：上传文件获得下载链接，内容加密后分块存入 D1；每个文件可单独设为公开或需要 API Key，管理员可限制每个用户的可用空间与新用户默认空间。
+- **文件存储**：上传文件获得下载链接，内容加密后存入 D1（分块）或 R2（绑定后可在管理后台切换）；每个文件可单独设为公开或需要 API Key，管理员可限制每个用户的可用空间与新用户默认空间。
 - **在线 API 文档**：侧栏底部内置文档页，按接口分类展示参数、curl 示例、错误码与限制。
 - **多用户 + 注册码**：管理员生成一次性/限次注册码，用户凭码注册；管理员拥有普通用户的全部能力。
 - **API Key 管理**：每个账号最多 20 个 Key，名称备注、默认隐藏、可显示/复制/删除，Key 在数据库中只保存哈希与密文。
@@ -52,7 +53,8 @@
 ```
 
 - 运行时：Cloudflare Workers（ES Module Worker，TypeScript）
-- 数据库：D1（通过 `DB` binding）；文件内容加密后按 900 KB 分块存入 `file_chunks`
+- 数据库：D1（通过 `DB` binding）；文件默认加密后按 900 KB 分块存入 `file_chunks`
+- 可选对象存储：R2（通过 `FILES` binding）；绑定后可在管理后台切换文件后端
 - 前端：原生 ES Module SPA（`public/app.js` + `public/docs.js`），hash 路由，无需打包
 - 密码学：WebCrypto（HKDF / AES-GCM / PBKDF2 / HMAC）
 
@@ -84,7 +86,7 @@
 
 4. **部署并初始化**
    - 保存后 Cloudflare 会触发构建部署；打开 `https://messagedispatchplatform.<你的子域>.workers.dev`，首次访问会要求为 `admin` 设置密码。
-   - 也可以用 `/api/health` 自检：`secret_configured: true`、`database: "ok"`、`schema_version: 2`。
+   - 也可以用 `/api/health` 自检：`secret_configured: true`、`database: "ok"`、`schema_version: 3`。
 
 5. （可选）在 **Settings → Domains & Routes** 绑定自定义域名。
 
@@ -156,6 +158,44 @@ pnpm db:migrate:local
 | `pnpm db:migrate:remote` | 对线上 D1 执行迁移 |
 
 > **Free 计划提示**：密码哈希使用 PBKDF2，默认 10 万次迭代，登录/注册请求的 CPU 时间可能超过 Free 计划 10ms 的限制。生产环境建议使用 Workers Paid；如果必须用 Free 计划，可在 `wrangler.jsonc` 的 `vars` 中把 `PASSWORD_ITERATIONS` 调到 `10000`～`20000`（会降低暴力破解成本，但仍然是加盐哈希）。
+
+## 文件存储后端（D1 / R2）
+
+文件默认存入 **D1**（AES-256-GCM 加密后按 900 KB 分块），不需要任何额外服务。如果你希望把文件放到 **R2**，可以按下面步骤启用并切换：
+
+1. 创建存储桶（名称可自定义，需与配置一致）：
+
+   ```bash
+   pnpm exec wrangler r2 bucket create message-dispatch-platform-files
+   ```
+
+   也可以在 Cloudflare 控制台 **R2 → Create bucket** 创建。
+
+2. 在 `wrangler.jsonc` 中取消 `r2_buckets` 的注释并重新部署：
+
+   ```jsonc
+   "r2_buckets": [
+     { "binding": "FILES", "bucket_name": "message-dispatch-platform-files" }
+   ],
+   ```
+
+3. 打开 **管理后台 → 文件存储 → 文件存储后端**，选择：
+
+   | 选项 | 行为 |
+   | --- | --- |
+   | 自动（默认） | 绑定了 `FILES` 就用 R2，否则用 D1 |
+   | D1 | 始终使用 D1 分块存储 |
+   | R2 | 始终使用 R2；未绑定 `FILES` 时上传返回 `503 storage_not_configured` |
+
+4. 也可以用环境变量 `FILE_STORAGE`（`auto` / `d1` / `r2`）设置默认值，管理后台的选择优先。
+
+说明：
+
+- 每个文件在 `files.storage` 中记录实际后端；**切换后端只影响新上传的文件**，旧文件继续按各自后端读取，不会失效。
+- 想要把已有 D1 文件迁移到 R2，需要重新上传（加密数据无法在不下载的情况下直接搬运）。
+- R2 文件需要 `FILES` 绑定才能下载或删除；如果临时移除绑定，这些文件会返回 `503`，恢复绑定即可。
+- R2 需要在 Cloudflare 账户中启用（免费额度为 10 GB 存储/月，开通时可能需要添加付款方式）；不启用 R2 时继续用 D1 即可。
+- 两种后端都受 `MAX_FILE_SIZE_MB` 与用户配额限制，前端文件列表会标注每个文件是 `D1` 还是 `R2`。
 
 ## 界面说明
 
@@ -368,13 +408,14 @@ curl -X POST "$BASE/api/uploadfile?api_key=$KEY" \
   "size": 20480,
   "content_type": "application/pdf",
   "private": true,
+  "backend": "d1",
   "url_path": "/api/downloadfile?id=8b1f…",
   "download_url": "https://your-worker.workers.dev/api/downloadfile?id=8b1f…",
   "storage": { "quota": 52428800, "used": 20480, "remaining": 52408320, "percent": 0.1, "file_count": 1 }
 }
 ```
 
-文件内容以 AES-256-GCM 加密后按 900 KB 分块写入 D1；超出配额返回 `413 storage_quota_exceeded`，超出单文件上限返回 `413 file_too_large`。
+文件内容以 AES-256-GCM 加密后存入所选后端：D1 按 900 KB 分块，R2 写入单个对象。默认后端为 `auto`（有 R2 绑定用 R2，否则 D1），可在管理后台切换；返回的 `backend` 表示本次文件实际使用的后端。超出配额返回 `413 storage_quota_exceeded`，超出单文件上限返回 `413 file_too_large`。
 
 #### ⑩ 下载文件
 
@@ -435,7 +476,7 @@ POST /api/deletefile
 | `POST /api/feedback/delete` | `session_id` | 删除会话 |
 | `POST /api/feedback/settings` | `enabled`、`intro` | 开启/关闭反馈、设置公开页说明 |
 | `POST /api/public/profile` | `user_name` | 公开页资料（是否开放、显示名、说明） |
-| `POST /api/files/list` | — | 自己的文件列表、配额与上限 |
+| `POST /api/files/list` | — | 自己的文件列表、配额、上限与当前存储后端 |
 | `POST /api/files/visibility` | `id`、`private` | 切换文件公开/私有 |
 | `POST /api/files/delete` | `id` | 删除自己的文件 |
 | `POST /api/overview` | — | 总览统计、存储用量与最近反馈 |
@@ -448,7 +489,7 @@ POST /api/deletefile
 | `POST /api/admin/codes/create` | `label`、`max_uses`、`expires_in_days` | 生成注册码（明文只返回一次） |
 | `POST /api/admin/codes/list` | — | 注册码列表与状态 |
 | `POST /api/admin/codes/revoke` | `id` | 吊销注册码 |
-| `POST /api/admin/storage` | `default_quota_mb` | 查看/设置新用户默认存储空间（只影响后续注册） |
+| `POST /api/admin/storage` | `default_quota_mb`、`backend` | 设置新用户默认空间与文件后端（`auto`/`d1`/`r2`） |
 | `POST /api/admin/users/list` | — | 用户列表（含文件数与存储用量） |
 | `POST /api/admin/users/storage` | `id`、`quota_mb` | 调整指定用户的存储空间 |
 | `POST /api/admin/users/reset-password` | `id`、`new_password` | 重置任意用户密码 |
@@ -461,8 +502,8 @@ GET /api/health
 ```
 
 ```json
-{ "status": 200, "app": "信息分发平台", "version": "1.1.0", "secret_configured": true,
-  "database": "ok", "schema_version": 2, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
+{ "status": 200, "app": "信息分发平台", "version": "1.2.0", "secret_configured": true,
+  "database": "ok", "schema_version": 3, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
 ```
 
 未配置 `JWT_SECRET` 或数据库异常时返回 `503`，便于监控告警。
@@ -550,10 +591,10 @@ curl -X POST "$BASE/api/sendfeedback" \
 | `registration_codes` | 注册码哈希、备注、次数、过期时间、吊销标记 |
 | `rate_limits` | 限流固定窗口计数 |
 | `user_storage` | 每用户存储配额与已用空间（`quota` / `used`） |
-| `files` | 文件元数据：文件名密文、大小、分块数、类型、公开/私有、下载次数 |
-| `file_chunks` | 文件密文分块（`file_id` + `idx` 主键），单块 900 KB |
+| `files` | 文件元数据：文件名密文、大小、分块数、类型、公开/私有、下载次数、存储后端（`d1`/`r2`） |
+| `file_chunks` | 文件密文分块（`file_id` + `idx` 主键），单块 900 KB；R2 后端不写此表 |
 
-表结构由 `migrations/0001_init.sql`、`migrations/0002_file_storage.sql` 定义；`src/db/schema.generated.ts` 由脚本生成，用于 Worker 首次请求时自动建表。
+表结构由 `migrations/0001_init.sql`、`0002_file_storage.sql`、`0003_file_storage_backend.sql` 定义；`src/db/schema.generated.ts` 由脚本生成，用于 Worker 首次请求时自动建表。
 
 ## 环境变量
 
@@ -568,6 +609,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 | `PASSWORD_ITERATIONS` | 否 | `100000` | PBKDF2 迭代次数（10000–500000） |
 | `MAX_FILE_SIZE_MB` | 否 | `10` | 单文件大小上限（1–20 MB） |
 | `DEFAULT_STORAGE_QUOTA_MB` | 否 | `50` | 新用户默认存储空间（1–10240 MB，管理后台可覆盖） |
+| `FILE_STORAGE` | 否 | `auto` | 文件存储默认后端：`auto` / `d1` / `r2`，管理后台设置优先 |
 | `RATE_LIMIT_DISABLED` | 否 | — | 设为 `1` 关闭限流（仅用于自动化测试） |
 
 ## 项目结构
@@ -576,6 +618,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 .
 ├── migrations/0001_init.sql       # 基础表结构
 ├── migrations/0002_file_storage.sql  # 文件存储与配额
+├── migrations/0003_file_storage_backend.sql  # 文件后端字段
 ├── public/                        # 静态资源（SPA）
 │   ├── index.html
 │   ├── app.js                     # 前端路由与页面
@@ -602,7 +645,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 ## 测试
 
 ```bash
-pnpm test        # 25 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、配额、越权、限流、管理后台
+pnpm test        # 31 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2 后端、配额、越权、限流、管理后台
 pnpm typecheck
 pnpm check       # 以上两项
 ```
@@ -635,6 +678,9 @@ pnpm check       # 以上两项
 **Q：调整“新用户默认空间”会影响老用户吗？**
 不会。默认值只用于之后注册的用户；老用户需要在用户列表中点硬盘图标单独调整。
 
+**Q：文件用 D1 还是 R2？可以切换吗？**
+默认 D1。创建 R2 存储桶并在 `wrangler.jsonc` 绑定 `FILES` 后，可在「管理后台 → 文件存储 → 文件存储后端」选择自动 / D1 / R2。切换只影响新文件，旧文件仍按各自后端读取。
+
 **Q：Free 计划登录报 1102（CPU 超时）？**
 降低 `PASSWORD_ITERATIONS`（如 10000）或升级 Workers Paid。
 
@@ -659,6 +705,7 @@ pnpm check       # 以上两项
 15. **新增内置文档页**：侧栏底部「API 文档」，参考常见开发者文档布局，按接口分类展示参数、curl 示例与错误码，代码块支持一键复制。
 16. **所有 JSON 接口统一带 `status`**：成功为 `200`，错误与 HTTP 状态码一致；二进制下载通过 `X-API-Status` 响应头返回。
 17. **README 与登录页**：移除一键部署按钮，改为说明如何在 Cloudflare Workers 中连接 GitHub 仓库；登录页底部标注开源项目地址。
+18. **文件存储可选后端**：默认 D1，绑定 R2 后可在管理后台切换自动 / D1 / R2；每个文件记录实际后端，切换不影响旧文件；未绑定 R2 时自动降级到 D1 并给出明确提示。
 
 ## License
 

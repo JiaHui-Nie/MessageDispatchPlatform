@@ -3,7 +3,8 @@ import { hashPassword, verifyPassword, getDummyPasswordHash } from '../lib/crypt
 import { badRequest, conflict, unauthorized } from '../lib/errors.ts';
 import { formatTime, nowIso } from '../lib/time.ts';
 import { normalizeUsername, validatePassword, validateUsername, LIMITS } from '../lib/validate.ts';
-import { fileDeletionStatements } from './storage.ts';
+import type { AppContext } from '../env.ts';
+import { deleteR2FilesForUser, fileDeletionStatements } from './storage.ts';
 
 export interface UserRow {
   id: number;
@@ -103,7 +104,10 @@ export async function touchLastLogin(db: D1Database, userId: number): Promise<vo
   await runStatement(db, 'UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?', [nowIso(), nowIso(), userId]);
 }
 
-export async function deleteUser(db: D1Database, userId: number): Promise<boolean> {
+export async function deleteUser(ctx: AppContext, userId: number): Promise<boolean> {
+  // 先清理 R2 对象（如果有），再删除 D1 中的元数据与关联数据。
+  await deleteR2FilesForUser(ctx, userId);
+  const db = ctx.db;
   // 显式级联删除，不依赖 D1 的 foreign_keys 设置是否开启。
   const sessions = await allRows<{ session_id: string }>(db, 'SELECT session_id FROM feedback_sessions WHERE user_id = ?', [
     userId,

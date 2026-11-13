@@ -1,10 +1,15 @@
 import { ApiError } from './lib/errors.ts';
 import { clampIterations } from './lib/crypto.ts';
 
+/** 文件存储模式：auto = 绑定 R2 时优先 R2，否则 D1。 */
+export type FileStorageMode = 'auto' | 'd1' | 'r2';
+
 /** Worker 运行环境绑定（与 wrangler.jsonc 中的绑定名称一致）。 */
 export interface Env {
   DB: D1Database;
   ASSETS?: Fetcher;
+  /** 可选：R2 文件存储桶；绑定后可在管理后台切换文件后端。 */
+  FILES?: R2Bucket;
   /** 必填密钥：同时用于签发 JWT 与派生 AES-256-GCM 数据加密密钥。 */
   JWT_SECRET?: string;
   APP_NAME?: string;
@@ -16,12 +21,15 @@ export interface Env {
   MAX_FILE_SIZE_MB?: string;
   /** 新用户默认存储空间（MB），默认 50，最大 10240。 */
   DEFAULT_STORAGE_QUOTA_MB?: string;
+  /** 文件存储后端默认值：auto / d1 / r2，管理后台设置优先。 */
+  FILE_STORAGE?: string;
 }
 
 /** 每个请求的运行时上下文。 */
 export interface AppContext {
   env: Env;
   db: D1Database;
+  files?: R2Bucket;
   secret: string;
   appName: string;
   tz: string;
@@ -30,6 +38,7 @@ export interface AppContext {
   rateLimitDisabled: boolean;
   maxFileSizeBytes: number;
   defaultStorageQuotaBytes: number;
+  fileStorage: FileStorageMode;
 }
 
 const MIN_SECRET_LENGTH = 16;
@@ -59,6 +68,7 @@ export function createContext(env: Env): AppContext {
   return {
     env,
     db: env.DB,
+    files: env.FILES,
     secret,
     appName: (env.APP_NAME ?? '信息分发平台').trim() || '信息分发平台',
     tz: (env.DISPLAY_TZ ?? 'Asia/Shanghai').trim() || 'Asia/Shanghai',
@@ -67,5 +77,11 @@ export function createContext(env: Env): AppContext {
     rateLimitDisabled: (env.RATE_LIMIT_DISABLED ?? '').trim() === '1',
     maxFileSizeBytes: parsePositiveInt(env.MAX_FILE_SIZE_MB, 10, 1, 20) * 1024 * 1024,
     defaultStorageQuotaBytes: parsePositiveInt(env.DEFAULT_STORAGE_QUOTA_MB, 50, 1, 10_240) * 1024 * 1024,
+    fileStorage: parseFileStorageMode(env.FILE_STORAGE),
   };
+}
+
+export function parseFileStorageMode(raw: string | undefined): FileStorageMode {
+  const value = (raw ?? '').trim().toLowerCase();
+  return value === 'd1' || value === 'r2' ? value : 'auto';
 }

@@ -5,6 +5,7 @@ import {
   deleteStoredFile,
   findFileRow,
   getFileContent,
+  getFileStorageStatus,
   getStorageInfo,
   listFiles,
   MAX_FILES_PER_USER,
@@ -116,6 +117,7 @@ export async function uploadFile(ctx: AppContext, request: Request, query: Param
   let size: number;
   let contentType: string;
   let createdAt: string;
+  let backend: 'd1' | 'r2' = 'd1';
   try {
     const row = await saveFile(ctx, actor.user.id, {
       name: displayName,
@@ -127,6 +129,7 @@ export async function uploadFile(ctx: AppContext, request: Request, query: Param
     size = Number(row.size);
     contentType = row.content_type;
     createdAt = row.created_at;
+    backend = row.storage === 'r2' ? 'r2' : 'd1';
   } catch (error) {
     await releaseStorage(ctx, actor.user.id, body.bytes.length);
     throw error;
@@ -141,6 +144,7 @@ export async function uploadFile(ctx: AppContext, request: Request, query: Param
     size,
     content_type: contentType,
     private: isPrivate,
+    backend,
     created_at: formatTime(createdAt, ctx.tz),
     url_path: `/api/downloadfile?id=${encodeURIComponent(fileId)}`,
     download_url: `${origin}/api/downloadfile?id=${encodeURIComponent(fileId)}`,
@@ -233,13 +237,17 @@ export async function deleteFileRoute(ctx: AppContext, request: Request, params:
 
 export async function listFilesRoute(ctx: AppContext, request: Request): Promise<Response> {
   const session = await requireUser(ctx, request);
-  const [files, storage] = await Promise.all([
+  const [files, storage, storageStatus] = await Promise.all([
     listFiles(ctx, session.user.id),
     getStorageInfo(ctx, session.user.id),
+    getFileStorageStatus(ctx),
   ]);
   return ok({
     files,
     storage,
+    storage_setting: storageStatus.setting,
+    storage_backend: storageStatus.backend,
+    r2_available: storageStatus.r2_available,
     limits: { max_file_size: ctx.maxFileSizeBytes, max_files: MAX_FILES_PER_USER },
   });
 }

@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { describe, it } from 'node:test';
 import { createHarness, createUser, ORIGIN, setupAdmin, TestClient, TEST_SECRET } from './helpers/harness.ts';
 import { ShimD1 } from './helpers/d1.ts';
+import { ShimR2 } from './helpers/r2.ts';
 import { handleRequest } from '../src/app.ts';
 import { SCHEMA_STATEMENTS, SCHEMA_VERSION } from '../src/db/schema.generated.ts';
 
@@ -955,6 +956,134 @@ describe('文件存储', () => {
   });
 });
 
+describe('文件存储后端', () => {
+  it('绑定 R2 且 auto 模式时写入 R2，下载与删除正常', async () => {
+    const r2 = new ShimR2();
+    const harness = createHarness({ FILES: r2 as unknown as R2Bucket });
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+
+    const upload = await alice.client.upload<Record<string, any>>(
+      '/api/uploadfile',
+      textFile('r2 content', 'r2.txt'),
+    );
+    assert.equal(upload.status, 200);
+    assert.equal(upload.data.backend, 'r2');
+    const fileId = String(upload.data.file_id);
+
+    const row = harness.db.raw.prepare('SELECT storage, chunk_count FROM files WHERE id = ?').get(fileId) as {
+      storage: string;
+      chunk_count: number;
+    };
+    assert.equal(row.storage, 'r2');
+    assert.equal(Number(row.chunk_count), 0);
+    const chunks = harness.db.raw.prepare('SELECT COUNT(*) AS total FROM file_chunks').get() as { total: number };
+    assert.equal(Number(chunks.total), 0);
+
+    const key = `files/${fileId}`;
+    assert.ok(r2.objects.has(key), 'R2 应存在对应对象');
+    const stored = Buffer.from(r2.objects.get(key) ?? new Uint8Array()).toString('utf8');
+    assert.ok(!stored.includes('r2 content'), 'R2 中应为密文');
+
+    const download = await new TestClient(harness.env).download(String(upload.data.url_path));
+    assert.equal(download.status, 200);
+    assert.equal(Buffer.from(await download.arrayBuffer()).toString('utf8'), 'r2 content');
+
+    const removed = await alice.client.post('/api/deletefile', { file_id: fileId });
+    assert.equal(removed.status, 200);
+    assert.equal(r2.objects.size, 0, '删除文件应清理 R2 对象');
+  });
+
+  it('FILE_STORAGE=d1 时即使绑定 R2 也写入 D1', async () => {
+    const r2 = new ShimR2();
+    const harness = createHarness({ FILES: r2 as unknown as R2Bucket, FILE_STORAGE: 'd1' });
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+
+    const upload = await alice.client.upload<Record<string, any>>('/api/uploadfile', textFile('d1 content', 'd1.txt'));
+    assert.equal(upload.status, 200);
+    assert.equal(upload.data.backend, 'd1');
+    const row = harness.db.raw.prepare('SELECT storage, chunk_count FROM files WHERE id = ?').get(upload.data.file_id) as {
+      storage: string;
+      chunk_count: number;
+    };
+    assert.equal(row.storage, 'd1');
+    assert.ok(Number(row.chunk_count) >= 1);
+    assert.equal(r2.objects.size, 0, '强制 D1 时不应写 R2');
+  });
+
+  it('管理员可切换后端，旧文件仍按原后端下载', async () => {
+    const r2 = new ShimR2();
+    const harness = createHarness({ FILES: r2 as unknown as R2Bucket, FILE_STORAGE: 'd1' });
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+
+    const d1File = await alice.client.upload<Record<string, any>>('/api/uploadfile', textFile('old d1', 'old.txt'));
+    assert.equal(d1File.data.backend, 'd1');
+
+    const switched = await harness.client.post<Record<string, any>>('/api/admin/storage', { backend: 'r2' });
+    assert.equal(switched.status, 200);
+    assert.equal(switched.data.storage_setting, 'r2');
+    assert.equal(switched.data.storage_backend, 'r2');
+    assert.equal(switched.data.r2_available, true);
+
+    const r2File = await alice.client.upload<Record<string, any>>('/api/uploadfile', textFile('new r2', 'new.txt'));
+    assert.equal(r2File.status, 200);
+    assert.equal(r2File.data.backend, 'r2');
+    assert.equal(r2.objects.size, 1);
+
+    const oldDownload = await new TestClient(harness.env).download(String(d1File.data.url_path));
+    assert.equal(oldDownload.status, 200);
+    assert.equal(Buffer.from(await oldDownload.arrayBuffer()).toString('utf8'), 'old d1');
+    const newDownload = await new TestClient(harness.env).download(String(r2File.data.url_path));
+    assert.equal(Buffer.from(await newDownload.arrayBuffer()).toString('utf8'), 'new r2');
+
+    const backToD1 = await harness.client.post<Record<string, any>>('/api/admin/storage', { backend: 'd1' });
+    assert.equal(backToD1.data.storage_backend, 'd1');
+    const third = await alice.client.upload<Record<string, any>>('/api/uploadfile', textFile('third d1', 'third.txt'));
+    assert.equal(third.data.backend, 'd1');
+
+    const list = await alice.client.post<Record<string, any>>('/api/files/list');
+    assert.equal(list.data.storage_backend, 'd1');
+    assert.equal(list.data.files.length, 3);
+  });
+
+  it('选择 R2 但未绑定 FILES 时返回明确错误', async () => {
+    const harness = createHarness({ FILE_STORAGE: 'r2' });
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+
+    const upload = await alice.client.upload('/api/uploadfile', textFile('x', 'x.txt'));
+    assert.equal(upload.status, 503);
+    assert.equal(upload.data.error, 'storage_not_configured');
+
+    const status = await alice.client.post<Record<string, any>>('/api/files/list');
+    assert.equal(status.data.storage_backend, null);
+    assert.equal(status.data.r2_available, false);
+    assert.equal(status.data.storage_setting, 'r2');
+
+    const adminSwitch = await harness.client.post('/api/admin/storage', { backend: 'r2' });
+    assert.equal(adminSwitch.status, 400);
+    assert.equal(adminSwitch.data.error, 'r2_unavailable');
+  });
+
+  it('删除用户会清理其 R2 对象', async () => {
+    const r2 = new ShimR2();
+    const harness = createHarness({ FILES: r2 as unknown as R2Bucket });
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+    const upload = await alice.client.upload<Record<string, any>>('/api/uploadfile', textFile('r2 file', 'r2.txt'));
+    assert.equal(upload.data.backend, 'r2');
+    assert.equal(r2.objects.size, 1);
+
+    const users = await harness.client.post<Record<string, any>>('/api/admin/users/list');
+    const aliceRow = users.data.users.find((user: Record<string, unknown>) => user.username === 'alice');
+    const removed = await harness.client.post('/api/admin/users/delete', { id: aliceRow.id });
+    assert.equal(removed.status, 200);
+    assert.equal(r2.objects.size, 0, '删除用户应清理 R2 对象');
+  });
+});
+
 describe('响应格式', () => {
   it('所有 JSON 接口都带 status，二进制下载带 x-api-status 头', async () => {
     const harness = createHarness();
@@ -997,7 +1126,7 @@ describe('响应格式', () => {
 
 describe('数据库与接口一致性', () => {
   it('生成的 schema 与迁移 SQL 保持一致', () => {
-    assert.equal(SCHEMA_VERSION, 2);
+    assert.equal(SCHEMA_VERSION, 3);
     const migrationsDir = new URL('../migrations/', import.meta.url);
     const files = readdirSync(migrationsDir)
       .filter((name) => /^\d{4}_.+\.sql$/.test(name))
@@ -1017,7 +1146,7 @@ describe('数据库与接口一致性', () => {
     assert.deepEqual([...SCHEMA_STATEMENTS], parts, '修改迁移后请运行 pnpm run gen:schema');
   });
 
-  it('从 v1 数据库自动升级到 v2（不依赖 ALTER TABLE）', async () => {
+  it('从 v1 数据库自动升级到最新 schema', async () => {
     const db = new ShimD1();
     const migrationSql = readFileSync(new URL('../migrations/0001_init.sql', import.meta.url), 'utf8');
     for (const statement of migrationSql.split('--> statement-breakpoint')) {
@@ -1054,11 +1183,13 @@ describe('数据库与接口一致性', () => {
     const versionRow = db.raw.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as {
       value: string;
     };
-    assert.equal(versionRow.value, '2');
+    assert.equal(versionRow.value, '3');
     const filesTable = db.raw
       .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'files'`)
       .get() as { name?: string } | undefined;
     assert.equal(filesTable?.name, 'files');
+    const fileColumns = db.raw.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>;
+    assert.ok(fileColumns.some((column) => column.name === 'storage'), 'files 表应包含 storage 列');
     const storage = db.raw
       .prepare('SELECT quota, used FROM user_storage WHERE user_id = 1')
       .get() as { quota: number; used: number } | undefined;
