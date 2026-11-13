@@ -132,6 +132,51 @@ async function api(path, body = {}, options = {}) {
   return data ?? { status: 200 };
 }
 
+/** 带上传进度的 XHR（fetch 不支持上传进度）。 */
+function xhrUpload(url, options = {}) {
+  const { method = 'POST', body, headers = {}, withCredentials = false, onProgress } = options;
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open(method, url, true);
+    xhr.withCredentials = withCredentials;
+    for (const [name, value] of Object.entries(headers)) {
+      xhr.setRequestHeader(name, value);
+    }
+    if (xhr.upload && typeof onProgress === 'function') {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) {
+          onProgress(event.loaded / event.total);
+        }
+      };
+    }
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        let data = {};
+        if (xhr.responseText) {
+          try {
+            data = JSON.parse(xhr.responseText);
+          } catch {
+            data = {};
+          }
+        }
+        resolve({ status: xhr.status, data });
+        return;
+      }
+      let message = `上传失败（HTTP ${xhr.status}）`;
+      try {
+        const parsed = JSON.parse(xhr.responseText);
+        if (parsed && typeof parsed.message === 'string') message = parsed.message;
+      } catch {
+        /* 非 JSON 错误响应 */
+      }
+      reject(new Error(message));
+    };
+    xhr.onerror = () => reject(new Error('网络错误，上传失败'));
+    xhr.ontimeout = () => reject(new Error('上传超时，请重试'));
+    xhr.send(body);
+  });
+}
+
 /* ------------------------------ UI 组件 ------------------------------ */
 
 let toastTimer = null;
@@ -994,6 +1039,8 @@ VIEWS.files = {
     const quotaLevel = storage.percent >= 90 ? 'danger' : storage.percent >= 70 ? 'warning' : '';
     const backendLabel =
       data.storage_backend === 'r2' ? 'R2 存储' : data.storage_backend === 'd1' ? 'D1 存储' : '存储未配置';
+    const direct = data.direct_upload ?? { available: false, threshold: 20 * 1024 * 1024, max_size: 0 };
+    const directThresholdMb = Math.max(0, Math.round(Number(direct.threshold || 0) / (1024 * 1024)));
 
     const rows = files
       .map(
@@ -1001,7 +1048,7 @@ VIEWS.files = {
         <tr>
           <td>
             <div class="file-name">${icon('file')}<span>${esc(file.name)}</span></div>
-            <div class="file-meta">${esc(file.content_type)} · ${formatBytes(file.size)} · ${file.backend === 'r2' ? 'R2' : 'D1'}</div>
+            <div class="file-meta">${esc(file.content_type)} · ${formatBytes(file.size)} · ${file.backend === 'r2' ? 'R2' : 'D1'} · ${file.encrypted ? '应用加密' : 'R2 直传'}</div>
           </td>
           <td>${
             file.private
@@ -1047,7 +1094,11 @@ VIEWS.files = {
           <div class="dropzone" data-dropzone role="button" tabindex="0" aria-label="上传文件">
             ${icon('upload')}
             <strong>点击选择文件，或拖拽到这里上传</strong>
-            <span>文件会以 AES-256-GCM 加密后存储，大小只受剩余空间限制</span>
+            <span>${
+              direct.available
+                ? `大于 ${directThresholdMb} MB 的文件会通过 R2 直传（不经过 Worker）`
+                : '文件会以 AES-256-GCM 加密后存储，大小只受剩余空间限制'
+            }</span>
             <input type="file" multiple data-file-input hidden />
           </div>
           <label class="checkbox mt-3">
@@ -1057,6 +1108,14 @@ VIEWS.files = {
               <small>上传后可在列表中随时切换公开/私有。</small>
             </div>
           </label>
+          <div class="upload-status" data-upload-status hidden>
+            <div class="row-between">
+              <span data-upload-label>准备上传…</span>
+              <span data-upload-percent>0%</span>
+            </div>
+            <progress class="quota-bar" data-upload-progress value="0" max="100"></progress>
+          </div>
+          ${direct.available ? '<p class="field-hint mt-2">大文件会直接上传到 R2，仅由 R2 服务端加密保护，不使用本站 JWT_SECRET 端到端加密。</p>' : ''}
           <div class="alert alert-error mt-3" data-upload-error hidden></div>
         </div>
       </section>
@@ -1085,7 +1144,24 @@ VIEWS.files = {
     const input = el.querySelector('[data-file-input]');
     const errorBox = el.querySelector('[data-upload-error]');
     const privateUpload = el.querySelector('[data-private-upload]');
+    const uploadStatus = el.querySelector('[data-upload-status]');
+    const uploadLabel = el.querySelector('[data-upload-label]');
+    const uploadPercent = el.querySelector('[data-upload-percent]');
+    const uploadProgress = el.querySelector('[data-upload-progress]');
+    let remaining = Number(storage.remaining) || 0;
     let uploading = false;
+
+    const setUploadProgress = (name, fraction, phase = '上传中') => {
+      if (!uploadStatus) return;
+      uploadStatus.hidden = false;
+      const percent = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+      if (uploadLabel) uploadLabel.textContent = `${name} · ${phase}`;
+      if (uploadPercent) uploadPercent.textContent = `${percent}%`;
+      if (uploadProgress) uploadProgress.value = percent;
+    };
+    const hideUploadProgress = () => {
+      if (uploadStatus) uploadStatus.hidden = true;
+    };
 
     const uploadFiles = async (fileList) => {
       if (uploading) return;
@@ -1095,20 +1171,69 @@ VIEWS.files = {
       zone.classList.add('is-uploading');
       hideError(errorBox);
       const results = [];
+      const directAvailable = Boolean(direct.available);
+      const threshold = Number(direct.threshold) || 0;
+
       for (const file of queue) {
-        const form = new FormData();
-        form.append('file', file);
-        if (privateUpload.checked) {
-          form.append('private', 'true');
+        if (file.size > remaining) {
+          showError(
+            errorBox,
+            `${file.name} 需要 ${formatBytes(file.size)}，但剩余空间只有 ${formatBytes(remaining)}`,
+          );
+          continue;
         }
         try {
-          results.push(await api('/api/uploadfile', form));
+          let result;
+          if (directAvailable && file.size > threshold) {
+            const contentType = file.type || 'application/octet-stream';
+            setUploadProgress(file.name, 0, '准备直传…');
+            const presign = await api('/api/files/presign', {
+              name: file.name,
+              size: file.size,
+              content_type: contentType,
+              private: privateUpload.checked,
+            });
+            setUploadProgress(file.name, 0.02, '上传到 R2…');
+            await xhrUpload(presign.upload_url, {
+              method: 'PUT',
+              body: file,
+              headers: presign.headers ?? {},
+              withCredentials: false,
+              onProgress: (fraction) => setUploadProgress(file.name, fraction * 0.95, '上传到 R2…'),
+            });
+            setUploadProgress(file.name, 0.97, '登记文件…');
+            result = await api('/api/files/complete', {
+              file_id: presign.file_id,
+              name: file.name,
+              content_type: contentType,
+              private: privateUpload.checked,
+            });
+          } else {
+            const form = new FormData();
+            form.append('file', file);
+            if (privateUpload.checked) {
+              form.append('private', 'true');
+            }
+            setUploadProgress(file.name, 0, '上传到 Worker…');
+            const response = await xhrUpload('/api/uploadfile', {
+              method: 'POST',
+              body: form,
+              withCredentials: true,
+              onProgress: (fraction) => setUploadProgress(file.name, fraction * 0.95, '上传到 Worker…'),
+            });
+            result = response.data;
+          }
+          results.push(result);
+          remaining = Math.max(0, remaining - Number(result.size || file.size));
+          setUploadProgress(file.name, 1, '完成');
         } catch (error) {
           showError(errorBox, `${file.name}：${error.message}`);
         }
       }
+
       uploading = false;
       zone.classList.remove('is-uploading');
+      hideUploadProgress();
       if (input) input.value = '';
       if (results.length === 0) {
         return;

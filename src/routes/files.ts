@@ -2,24 +2,30 @@ import {
   claimStorage,
   countFiles,
   deleteStoredFile,
+  fileObjectKey,
   findFileRow,
   getFileContent,
   getFileStorageStatus,
   getStorageInfo,
   listFiles,
   MAX_FILES_PER_USER,
+  R2_MAX_SINGLE_UPLOAD,
+  registerDirectUpload,
   releaseStorage,
   saveFile,
   setFileVisibility,
+  toFileView,
 } from '../data/storage.ts';
 import { findApiKeyOwner } from '../data/apikeys.ts';
 import { resolveActor } from '../auth/actor.ts';
 import { currentUser, requireUser } from '../auth/session.ts';
 import { rateLimit } from '../auth/ratelimit.ts';
-import type { AppContext } from '../env.ts';
+import { hasDirectUploadCredentials, type AppContext } from '../env.ts';
 import { decryptString } from '../lib/crypto.ts';
-import { badRequest, forbidden, notFound } from '../lib/errors.ts';
-import { boolParam, ok, stringParam, type Params } from '../lib/http.ts';
+import { randomHex } from '../lib/encoding.ts';
+import { ApiError, badRequest, forbidden, notFound, payloadTooLarge } from '../lib/errors.ts';
+import { boolParam, intParam, ok, optionalString, stringParam, type Params } from '../lib/http.ts';
+import { presignR2Put, R2_PRESIGN_EXPIRES_SECONDS } from '../lib/r2-presign.ts';
 import { formatTime } from '../lib/time.ts';
 import { runStatement } from '../db/d1.ts';
 
@@ -150,6 +156,100 @@ export async function uploadFile(ctx: AppContext, request: Request, query: Param
   });
 }
 
+async function directUploadStatus(
+  ctx: AppContext,
+): Promise<{ available: boolean; threshold: number; max_size: number }> {
+  const storage = await getFileStorageStatus(ctx);
+  return {
+    available: Boolean(ctx.files && storage.backend === 'r2' && hasDirectUploadCredentials(ctx.env)),
+    threshold: ctx.directUploadThresholdBytes,
+    max_size: R2_MAX_SINGLE_UPLOAD,
+  };
+}
+
+/** /files/presign：为超过阈值的文件生成 R2 直传 URL（浏览器直接 PUT 到 R2）。 */
+export async function presignUpload(ctx: AppContext, request: Request, params: Params): Promise<Response> {
+  const session = await requireUser(ctx, request);
+  const direct = await directUploadStatus(ctx);
+  if (!direct.available) {
+    throw new ApiError(
+      503,
+      'direct_upload_unavailable',
+      'R2 直传未启用。请先在管理后台选择 R2 后端，并配置 R2 S3 API 凭据。',
+    );
+  }
+  const name = sanitizeFilename(stringParam(params, 'name', { max: 200, label: '文件名' }));
+  const size = intParam(params, 'size', { min: 1, max: R2_MAX_SINGLE_UPLOAD, label: '文件大小' });
+  const contentType = sanitizeContentType(optionalString(params, 'content_type') ?? 'application/octet-stream');
+  const isPrivate = boolParam(params, 'private', false);
+
+  await rateLimit(ctx, `files:presign:${session.user.id}`, 60, 600);
+  if ((await countFiles(ctx.db, session.user.id)) >= MAX_FILES_PER_USER) {
+    throw badRequest('too_many_files', `每个账号最多保存 ${MAX_FILES_PER_USER} 个文件`);
+  }
+  const storage = await getStorageInfo(ctx, session.user.id);
+  if (size > storage.remaining) {
+    throw payloadTooLarge('storage_quota_exceeded', '剩余存储空间不足', {
+      quota: storage.quota,
+      used: storage.used,
+      required: size,
+      remaining: storage.remaining,
+    });
+  }
+
+  const fileId = randomHex(24);
+  const objectKey = `files/${session.user.id}/${fileId}`;
+  const uploadUrl = await presignR2Put(ctx.env, objectKey, contentType);
+  return ok({
+    user_name: session.user.username,
+    file_id: fileId,
+    name,
+    size,
+    content_type: contentType,
+    private: isPrivate,
+    direct: true,
+    upload_url: uploadUrl,
+    method: 'PUT',
+    headers: { 'content-type': contentType },
+    expires_in: R2_PRESIGN_EXPIRES_SECONDS,
+    max_size: Math.min(R2_MAX_SINGLE_UPLOAD, storage.remaining),
+    threshold: direct.threshold,
+    storage,
+  });
+}
+
+/** /files/complete：直传完成后登记元数据、校验实际大小并占用配额。 */
+export async function completeUpload(ctx: AppContext, request: Request, params: Params): Promise<Response> {
+  const session = await requireUser(ctx, request);
+  const fileId = stringParam(params, 'file_id', { max: 64, label: '文件 ID' });
+  if (!/^[0-9a-f]{48}$/.test(fileId)) {
+    throw badRequest('invalid_file_id', 'file_id 格式不正确');
+  }
+  const name = sanitizeFilename(stringParam(params, 'name', { max: 200, label: '文件名' }));
+  const contentType = sanitizeContentType(optionalString(params, 'content_type') ?? 'application/octet-stream');
+  const isPrivate = boolParam(params, 'private', false);
+
+  await rateLimit(ctx, `files:complete:${session.user.id}`, 120, 600);
+  const row = await registerDirectUpload(ctx, session.user.id, { fileId, name, contentType, private: isPrivate });
+  const view = await toFileView(ctx, row);
+  const origin = new URL(request.url).origin;
+  return ok({
+    user_name: session.user.username,
+    file_id: view.id,
+    name: view.name,
+    size: view.size,
+    content_type: view.content_type,
+    private: view.private,
+    encrypted: view.encrypted,
+    backend: view.backend,
+    direct: true,
+    created_at: view.created_at_display,
+    url_path: view.url_path,
+    download_url: `${origin}${view.url_path}`,
+    storage: await getStorageInfo(ctx, session.user.id),
+  });
+}
+
 async function assertDownloadAccess(
   ctx: AppContext,
   request: Request,
@@ -182,6 +282,19 @@ function contentDisposition(filename: string): string {
   return `attachment; filename="${ascii}"; filename*=UTF-8''${encoded}`;
 }
 
+function downloadHeaders(row: { content_type: string }, filename: string, size: number): Record<string, string> {
+  return {
+    'content-type': row.content_type,
+    'content-length': String(size),
+    'content-disposition': contentDisposition(filename),
+    'cache-control': 'private, no-store',
+    'x-content-type-options': 'nosniff',
+    'content-security-policy': "sandbox; default-src 'none'",
+    // 二进制响应无法在 JSON 体内返回 status，用响应头给出同一信息。
+    'x-api-status': '200',
+  };
+}
+
 /** /downloadfile：GET（浏览器链接）或 POST 均可；私有文件需 api_key / 所有者会话。 */
 export async function downloadFile(ctx: AppContext, request: Request, params: Params): Promise<Response> {
   const fileId = (params.id ?? params.file_id ?? '').trim();
@@ -195,22 +308,36 @@ export async function downloadFile(ctx: AppContext, request: Request, params: Pa
   if (row.private === 1) {
     await assertDownloadAccess(ctx, request, params, row);
   }
+
+  const filename = await decryptString(ctx.secret, row.name_enc);
+  const plainR2 = row.storage === 'r2' && Number(row.encrypted ?? 1) === 0;
+
+  // 浏览器直传的文件没有经过 Worker 端加密，直接流式返回，避免把大文件读进内存。
+  if (plainR2) {
+    if (!ctx.files) {
+      throw new ApiError(503, 'storage_not_configured', '该文件存储在 R2，但当前 Worker 未绑定 FILES');
+    }
+    const objectKey = fileObjectKey(row);
+    const object = request.method === 'HEAD' ? await ctx.files.head(objectKey) : await ctx.files.get(objectKey);
+    if (!object) {
+      throw notFound('file_not_found', '文件数据不存在或已被删除');
+    }
+    if (request.method !== 'HEAD') {
+      await runStatement(ctx.db, 'UPDATE files SET downloads = downloads + 1 WHERE id = ?', [row.id]);
+    }
+    const headers = downloadHeaders(row, filename, Number(object.size));
+    const body = request.method === 'HEAD' ? null : (object as R2ObjectBody).body;
+    return new Response(body, { status: 200, headers });
+  }
+
   const bytes = await getFileContent(ctx, row);
   if (request.method !== 'HEAD') {
     await runStatement(ctx.db, 'UPDATE files SET downloads = downloads + 1 WHERE id = ?', [row.id]);
   }
-  const filename = await decryptString(ctx.secret, row.name_enc);
-  const headers: Record<string, string> = {
-    'content-type': row.content_type,
-    'content-length': String(bytes.length),
-    'content-disposition': contentDisposition(filename),
-    'cache-control': 'private, no-store',
-    'x-content-type-options': 'nosniff',
-    'content-security-policy': "sandbox; default-src 'none'",
-    // 二进制响应无法在 JSON 体内返回 status，用响应头给出同一信息。
-    'x-api-status': '200',
-  };
-  return new Response(request.method === 'HEAD' ? null : bytes, { status: 200, headers });
+  return new Response(request.method === 'HEAD' ? null : bytes, {
+    status: 200,
+    headers: downloadHeaders(row, filename, bytes.length),
+  });
 }
 
 /** /deletefile：api_key 或登录态均可。 */
@@ -245,6 +372,11 @@ export async function listFilesRoute(ctx: AppContext, request: Request): Promise
     storage_setting: storageStatus.setting,
     storage_backend: storageStatus.backend,
     r2_available: storageStatus.r2_available,
+    direct_upload: {
+      available: Boolean(ctx.files && storageStatus.backend === 'r2' && hasDirectUploadCredentials(ctx.env)),
+      threshold: ctx.directUploadThresholdBytes,
+      max_size: R2_MAX_SINGLE_UPLOAD,
+    },
   });
 }
 

@@ -77,6 +77,8 @@ const ROUTES: RouteDef[] = [
   { method: 'HEAD', path: '/api/downloadfile', handler: files.downloadFile },
   { method: 'POST', path: '/api/deletefile', handler: files.deleteFileRoute },
   { method: 'POST', path: '/api/files/list', handler: files.listFilesRoute },
+  { method: 'POST', path: '/api/files/presign', handler: files.presignUpload },
+  { method: 'POST', path: '/api/files/complete', handler: files.completeUpload },
   { method: 'POST', path: '/api/files/visibility', handler: files.updateFileVisibility },
   { method: 'POST', path: '/api/files/delete', handler: files.deleteFileUi },
 

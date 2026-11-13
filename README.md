@@ -35,7 +35,7 @@
 
 - **固定信息分发**：按 `key` 读写信息，公开信息可直接读取，私有信息需要 API Key。
 - **反馈对话**：访客无需注册即可提交反馈，拿到 `session_id` 后可持续追加消息；接收者在后台回复，支持未读/已读、筛选、删除。
-- **文件存储**：上传文件获得下载链接，内容加密后存入 D1（分块）或 R2（绑定后可在管理后台切换）；每个文件可单独设为公开或需要 API Key，管理员可限制每个用户的可用空间与新用户默认空间。
+- **文件存储**：上传文件获得下载链接，内容加密后存入 D1（分块）或 R2（绑定后可在管理后台切换）；超过 20 MB 的文件可浏览器直传 R2，避开 Worker 内存限制；每个文件可单独设为公开或需要 API Key，管理员可限制每个用户的可用空间与新用户默认空间。
 - **在线 API 文档**：侧栏底部内置文档页，按接口分类展示参数、curl 示例、错误码与限制。
 - **多用户 + 注册码**：管理员生成一次性/限次注册码，用户凭码注册；管理员拥有普通用户的全部能力。
 - **API Key 管理**：每个账号最多 20 个 Key，名称备注、默认隐藏、可显示/复制/删除，Key 在数据库中只保存哈希与密文。
@@ -196,6 +196,46 @@ pnpm db:migrate:local
 - R2 文件需要 `FILES` 绑定才能下载或删除；如果临时移除绑定，这些文件会返回 `503`，恢复绑定即可。
 - R2 需要在 Cloudflare 账户中启用（免费额度为 10 GB 存储/月，开通时可能需要添加付款方式）；不启用 R2 时继续用 D1 即可。
 - 两种后端都只受用户配额限制，单个文件不设独立大小上限；前端文件列表会标注每个文件是 `D1` 还是 `R2`。
+
+### 大文件直传 R2（预签名，推荐用于超过 20 MB 的文件）
+
+浏览器直接 `PUT` 到 R2，不经过 Worker，因此不受 Worker 的 100 MB 请求体与 128 MB 内存限制；R2 单次 PUT 上限约 **4.995 GiB**。
+
+启用步骤：
+
+1. 完成上面的 R2 绑定，并在管理后台选择 **R2** 或 **自动**。
+2. 创建 R2 S3 API 令牌（权限：Object Read & Write），拿到 `Access Key ID` 和 `Secret Access Key`。
+3. 设置 4 个 Worker Secret（不要写进仓库；`R2_BUCKET_NAME` 必须与 `FILES` 绑定的桶名一致）：
+
+   ```bash
+   pnpm exec wrangler secret put R2_ACCOUNT_ID
+   pnpm exec wrangler secret put R2_BUCKET_NAME
+   pnpm exec wrangler secret put R2_ACCESS_KEY_ID
+   pnpm exec wrangler secret put R2_SECRET_ACCESS_KEY
+   ```
+
+4. 给 R2 桶配置 CORS（把域名换成你的站点）：
+
+   ```json
+   [
+     {
+       "AllowedOrigins": ["https://your.domain.com"],
+       "AllowedMethods": ["PUT"],
+       "AllowedHeaders": ["content-type"],
+       "ExposeHeaders": ["ETag"],
+       "MaxAgeSeconds": 3600
+     }
+   ]
+   ```
+
+5. `DIRECT_UPLOAD_THRESHOLD_MB` 默认 `20`：大于该值的文件自动使用 R2 直传；设为 `0` 表示全部直传。
+
+说明：
+
+- 预签名 URL 有效期 15 分钟；上传完成后 Worker 用 `HEAD` 校验实际大小，再占用配额，超出配额会删除对象。
+- 直传文件仅依赖 **R2 服务端加密**（AES-256），不使用本项目的 `JWT_SECRET` 端到端加密；文件列表会标注「R2 直传」，Worker 上传的文件标注「应用加密」。
+- 未完成的上传对象不计配额，但会留在桶里；可给 `files/` 前缀配置生命周期规则定期清理。
+- 浏览器直传必须配置 CORS，否则会在预检阶段被拦截。
 
 ## 界面说明
 
@@ -452,6 +492,49 @@ POST /api/deletefile
 
 删除后立即释放配额，下载链接失效。
 
+#### ⑫ R2 预签名直传
+
+```http
+POST /api/files/presign
+```
+
+需要网页登录态（Cookie）。返回一个短时效的 R2 PUT URL，浏览器直接上传，不经过 Worker。
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 是 | 文件名，最多 200 字符 |
+| `size` | 是 | 文件字节数，用于提前检查剩余配额 |
+| `content_type` | 否 | 默认 `application/octet-stream`，必须与 PUT 时一致 |
+| `private` | 否 | 是否需要 API Key 才能下载 |
+
+```json
+{
+  "status": 200,
+  "file_id": "8b1f…",
+  "upload_url": "https://<bucket>.<account>.r2.cloudflarestorage.com/files/1/8b1f…?X-Amz-…",
+  "method": "PUT",
+  "headers": { "content-type": "application/pdf" },
+  "expires_in": 900,
+  "max_size": 5363449856,
+  "threshold": 20971520
+}
+```
+
+上传完成后调用：
+
+```http
+POST /api/files/complete
+```
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `file_id` | 是 | presign 返回的 ID |
+| `name` | 是 | 文件名（建议与 presign 一致） |
+| `content_type` | 否 | 与 PUT 时一致 |
+| `private` | 否 | 是否私有 |
+
+Worker 会用 `HEAD` 读取实际对象大小并占用配额；超出配额或对象不存在时分别返回 `413` / `404`，超额对象会被删除。直传文件在 `files.encrypted = 0`，仅依赖 R2 服务端加密。
+
 ### 网页后台接口（Cookie 会话）
 
 | 接口 | 参数 | 说明 |
@@ -476,7 +559,9 @@ POST /api/deletefile
 | `POST /api/feedback/delete` | `session_id` | 删除会话 |
 | `POST /api/feedback/settings` | `enabled`、`intro` | 开启/关闭反馈、设置公开页说明 |
 | `POST /api/public/profile` | `user_name` | 公开页资料（是否开放、显示名、说明） |
-| `POST /api/files/list` | — | 自己的文件列表、配额与当前存储后端 |
+| `POST /api/files/list` | — | 自己的文件列表、配额、当前存储后端与直传状态 |
+| `POST /api/files/presign` | `name`、`size`、`content_type`、`private` | 生成 R2 直传 URL（大文件） |
+| `POST /api/files/complete` | `file_id`、`name`、`content_type`、`private` | 直传完成后登记文件并校验配额 |
 | `POST /api/files/visibility` | `id`、`private` | 切换文件公开/私有 |
 | `POST /api/files/delete` | `id` | 删除自己的文件 |
 | `POST /api/overview` | — | 总览统计、存储用量与最近反馈 |
@@ -502,7 +587,7 @@ GET /api/health
 ```
 
 ```json
-{ "status": 200, "app": "信息分发平台", "version": "1.2.1", "secret_configured": true,
+{ "status": 200, "app": "信息分发平台", "version": "1.3.0", "secret_configured": true,
   "database": "ok", "schema_version": 3, "needs_setup": false, "time": "2026-11-13T06:00:00.000Z" }
 ```
 
@@ -523,11 +608,13 @@ GET /api/health
 | 403 | `user_mismatch` | 凭据与 `user_name` 不匹配 |
 | 403 | `admin_required` | 需要管理员权限 |
 | 403 | `cross_origin_denied` | 跨站请求被拒绝 |
-| 404 | `not_found` / `feedback_not_found` / `file_not_found` | 资源不存在 |
+| 404 | `not_found` / `feedback_not_found` / `file_not_found` / `upload_not_found` | 资源不存在 |
 | 409 | `already_setup` / `username_taken` | 已初始化 / 用户名被占用 |
 | 413 | `storage_quota_exceeded` | 剩余存储空间不足 |
+| 413 | `file_too_large` | 超过 R2 单次 PUT 上限（约 5 GiB） |
 | 429 | `rate_limited` | 触发限流，响应带 `Retry-After` |
 | 500 | `missing_secret` / `decryption_failed` | 服务端密钥缺失或密钥不一致 |
+| 503 | `direct_upload_unavailable` | 未配置 R2 直传，或当前后端不是 R2 |
 
 ### curl 示例
 
@@ -561,6 +648,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 | 数据加密 | AES-256-GCM，密钥 = HKDF-SHA256(`JWT_SECRET`)，每条数据随机 12 字节 IV |
 | 加密字段 | 信息 `value`、反馈标题与正文、反馈简介、API Key 明文、文件名、文件内容 |
 | 文件存储 | 内容以 AES-256-GCM 加密后按 900 KB 分块写入 D1；私有文件下载需所有者 API Key，响应带 `nosniff` 与 `CSP: sandbox` |
+| R2 直传 | 预签名 URL 15 分钟有效、对象键包含用户 ID；上传后 `HEAD` 校验实际大小并占用配额，超额自动删除；直传文件仅依赖 R2 服务端加密 |
 | API Key | 数据库只存 SHA-256 摘要（查找）与 AES-GCM 密文（本人回显），格式 `mdp_` + 48 位十六进制 |
 | 注册码 | 80 bit 随机、去除易混淆字符，只存 SHA-256 摘要；支持限次、过期、吊销；注册失败自动回滚次数 |
 | CSRF | `SameSite=Strict` Cookie + 校验 `Origin` 与请求 Host 一致 |
@@ -590,7 +678,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 | `registration_codes` | 注册码哈希、备注、次数、过期时间、吊销标记 |
 | `rate_limits` | 限流固定窗口计数 |
 | `user_storage` | 每用户存储配额与已用空间（`quota` / `used`） |
-| `files` | 文件元数据：文件名密文、大小、分块数、类型、公开/私有、下载次数、存储后端（`d1`/`r2`） |
+| `files` | 文件元数据：文件名密文、大小、分块数、类型、公开/私有、下载次数、存储后端（`d1`/`r2`）、是否应用加密（`encrypted`）、R2 对象键（`object_key`） |
 | `file_chunks` | 文件密文分块（`file_id` + `idx` 主键），单块 900 KB；R2 后端不写此表 |
 
 表结构由 `migrations/0001_init.sql`、`0002_file_storage.sql`、`0003_file_storage_backend.sql` 定义；`src/db/schema.generated.ts` 由脚本生成，用于 Worker 首次请求时自动建表。
@@ -608,6 +696,13 @@ curl -X POST "$BASE/api/sendfeedback" \
 | `PASSWORD_ITERATIONS` | 否 | `100000` | PBKDF2 迭代次数（10000–500000） |
 | `DEFAULT_STORAGE_QUOTA_MB` | 否 | `50` | 新用户默认存储空间（1–10240 MB，管理后台可覆盖） |
 | `FILE_STORAGE` | 否 | `auto` | 文件存储默认后端：`auto` / `d1` / `r2`，管理后台设置优先 |
+| `R2_ACCOUNT_ID` | 否* | — | R2 直传所需：Cloudflare Account ID（Secret） |
+| `R2_BUCKET_NAME` | 否* | — | R2 直传所需：桶名（Secret） |
+| `R2_ACCESS_KEY_ID` | 否* | — | R2 S3 API Access Key（Secret） |
+| `R2_SECRET_ACCESS_KEY` | 否* | — | R2 S3 API Secret Key（Secret） |
+| `DIRECT_UPLOAD_THRESHOLD_MB` | 否 | `20` | 超过该大小的文件使用 R2 直传；`0` 表示全部直传 |
+
+> 标记 `*` 的 R2 配置仅在大文件直传时需要，建议用 `pnpm exec wrangler secret put <名称>` 设置。
 | `RATE_LIMIT_DISABLED` | 否 | — | 设为 `1` 关闭限流（仅用于自动化测试） |
 
 ## 项目结构
@@ -617,6 +712,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 ├── migrations/0001_init.sql       # 基础表结构
 ├── migrations/0002_file_storage.sql  # 文件存储与配额
 ├── migrations/0003_file_storage_backend.sql  # 文件后端字段
+├── migrations/0004_direct_upload.sql  # 直传文件字段（encrypted/object_key）
 ├── public/                        # 静态资源（SPA）
 │   ├── index.html
 │   ├── app.js                     # 前端路由与页面
@@ -633,7 +729,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 │   ├── auth/                      # 会话、API Key/会话身份解析、限流
 │   ├── data/                      # 用户、信息、反馈、注册码、文件存储、统计
 │   ├── db/                        # D1 查询工具与 schema
-│   ├── lib/                       # 加密、编码、时间、HTTP、校验
+│   ├── lib/                       # 加密、编码、时间、HTTP、校验、SigV4 签名
 │   └── routes/                    # 各接口处理器
 ├── tests/                         # node:test 集成测试 + D1 兼容层
 ├── wrangler.jsonc
@@ -643,7 +739,7 @@ curl -X POST "$BASE/api/sendfeedback" \
 ## 测试
 
 ```bash
-pnpm test        # 32 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2 后端、配额、越权、限流、管理后台
+pnpm test        # 37 个集成测试：认证、注册码、API Key、信息、反馈、文件存储、D1/R2、直传、配额、越权、限流、管理后台
 pnpm typecheck
 pnpm check       # 以上两项
 ```
@@ -679,6 +775,9 @@ pnpm check       # 以上两项
 **Q：文件用 D1 还是 R2？可以切换吗？**
 默认 D1。创建 R2 存储桶并在 `wrangler.jsonc` 绑定 `FILES` 后，可在「管理后台 → 文件存储 → 文件存储后端」选择自动 / D1 / R2。切换只影响新文件，旧文件仍按各自后端读取。
 
+**Q：大文件（50 MB、1 GB）怎么上传？**
+配置 R2 直传后，超过 `DIRECT_UPLOAD_THRESHOLD_MB`（默认 20 MB）的文件会在浏览器里直接 PUT 到 R2，不经过 Worker，单次上限约 4.995 GiB。配置见「大文件直传 R2」一节。
+
 **Q：Free 计划登录报 1102（CPU 超时）？**
 降低 `PASSWORD_ITERATIONS`（如 10000）或升级 Workers Paid。
 
@@ -704,6 +803,7 @@ pnpm check       # 以上两项
 16. **所有 JSON 接口统一带 `status`**：成功为 `200`，错误与 HTTP 状态码一致；二进制下载通过 `X-API-Status` 响应头返回。
 17. **README 与登录页**：移除一键部署按钮，改为说明如何在 Cloudflare Workers 中连接 GitHub 仓库；登录页底部标注开源项目地址。
 18. **文件存储可选后端**：默认 D1，绑定 R2 后可在管理后台切换自动 / D1 / R2；每个文件记录实际后端，切换不影响旧文件；未绑定 R2 时自动降级到 D1 并给出明确提示。
+19. **大文件 R2 直传**：超过阈值（默认 20 MB）的文件使用预签名 URL 由浏览器直接上传到 R2，绕过 Worker 的 128 MB 内存与请求体限制；上传完成后由 Worker `HEAD` 校验大小、占用配额并登记元数据，超额自动删除对象。
 
 ## License
 

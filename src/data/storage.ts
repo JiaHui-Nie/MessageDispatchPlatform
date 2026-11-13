@@ -1,6 +1,6 @@
 import { allRows, firstRow, runStatement } from '../db/d1.ts';
 import { decryptBytes, decryptString, encryptBytes, encryptString } from '../lib/crypto.ts';
-import { ApiError, DecryptionError, notFound, payloadTooLarge } from '../lib/errors.ts';
+import { ApiError, DecryptionError, badRequest, notFound, payloadTooLarge } from '../lib/errors.ts';
 import { randomHex } from '../lib/encoding.ts';
 import { formatTime, nowIso } from '../lib/time.ts';
 import type { AppContext, FileStorageMode } from '../env.ts';
@@ -36,6 +36,8 @@ export interface FileRow {
   downloads: number;
   created_at: string;
   storage: FileBackend;
+  encrypted: number;
+  object_key: string | null;
 }
 
 export interface FileView {
@@ -49,6 +51,7 @@ export interface FileView {
   created_at_display: string;
   url_path: string;
   backend: FileBackend;
+  encrypted: boolean;
 }
 
 export interface StorageInfo {
@@ -62,6 +65,11 @@ export interface StorageInfo {
 /** R2 对象键；与 D1 中的文件 id 一一对应。 */
 export function r2Key(fileId: string): string {
   return `files/${fileId}`;
+}
+
+/** 兼容历史数据（object_key 为空时按 files/<id> 推断）。 */
+export function fileObjectKey(row: Pick<FileRow, 'id' | 'object_key'>): string {
+  return row.object_key ?? r2Key(row.id);
 }
 
 export async function getStorageSetting(ctx: AppContext): Promise<FileStorageMode> {
@@ -259,8 +267,8 @@ export async function saveFile(
     // 先写元数据行，再写分块：file_chunks.file_id 外键依赖 files(id)。
     const row = await firstRow<FileRow>(
       ctx.db,
-      `INSERT INTO files (id, user_id, name_enc, size, chunk_count, content_type, private, downloads, created_at, storage)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?) RETURNING *`,
+      `INSERT INTO files (id, user_id, name_enc, size, chunk_count, content_type, private, downloads, created_at, storage, encrypted, object_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, 1, ?) RETURNING *`,
       [
         fileId,
         userId,
@@ -271,6 +279,7 @@ export async function saveFile(
         input.private ? 1 : 0,
         createdAt,
         backend,
+        backend === 'r2' ? objectKey : null,
       ],
     );
     if (!row) {
@@ -303,6 +312,79 @@ export async function findFileRow(db: D1Database, fileId: string): Promise<FileR
   return firstRow<FileRow>(db, 'SELECT * FROM files WHERE id = ?', [fileId]);
 }
 
+/** R2 单次 PUT 的平台上限（4.995 GiB）。 */
+export const R2_MAX_SINGLE_UPLOAD = Math.floor(4.995 * 1024 * 1024 * 1024);
+
+/**
+ * 登记浏览器直传到 R2 的文件：只校验对象、占用配额并写元数据，不读取文件内容。
+ * 直传文件仅受 R2 服务端加密保护，因此 encrypted = 0。
+ */
+export async function registerDirectUpload(
+  ctx: AppContext,
+  userId: number,
+  input: { fileId: string; name: string; contentType: string; private: boolean },
+): Promise<FileRow> {
+  if (!ctx.files) {
+    throw new ApiError(503, 'storage_not_configured', '当前 Worker 未绑定 FILES，无法登记直传文件');
+  }
+  const existing = await findFileRow(ctx.db, input.fileId);
+  if (existing) {
+    if (existing.user_id === userId) {
+      return existing;
+    }
+    throw notFound('upload_not_found', '上传记录不存在');
+  }
+
+  const objectKey = `files/${userId}/${input.fileId}`;
+  const object = await ctx.files.head(objectKey);
+  if (!object) {
+    throw notFound('upload_not_found', '未找到已上传的文件，请重新上传');
+  }
+  const size = Number(object.size);
+  if (!Number.isFinite(size) || size <= 0) {
+    await ctx.files.delete(objectKey).catch(() => undefined);
+    throw badRequest('empty_file', '文件内容为空');
+  }
+  if (size > R2_MAX_SINGLE_UPLOAD) {
+    await ctx.files.delete(objectKey).catch(() => undefined);
+    throw payloadTooLarge('file_too_large', 'R2 单次上传上限约为 5 GiB', { size });
+  }
+  if ((await countFiles(ctx.db, userId)) >= MAX_FILES_PER_USER) {
+    await ctx.files.delete(objectKey).catch(() => undefined);
+    throw badRequest('too_many_files', `每个账号最多保存 ${MAX_FILES_PER_USER} 个文件`);
+  }
+
+  try {
+    await claimStorage(ctx, userId, size);
+  } catch (error) {
+    await ctx.files.delete(objectKey).catch(() => undefined);
+    throw error;
+  }
+
+  const nameEnc = await encryptString(ctx.secret, input.name);
+  const createdAt = nowIso();
+  try {
+    const row = await firstRow<FileRow>(
+      ctx.db,
+      `INSERT INTO files (id, user_id, name_enc, size, chunk_count, content_type, private, downloads, created_at, storage, encrypted, object_key)
+       VALUES (?, ?, ?, ?, 0, ?, ?, 0, ?, 'r2', 0, ?) RETURNING *`,
+      [input.fileId, userId, nameEnc, size, input.contentType, input.private ? 1 : 0, createdAt, objectKey],
+    );
+    if (!row) {
+      throw new Error('保存文件元数据失败');
+    }
+    return row;
+  } catch (error) {
+    // 并发重复登记时，另一请求可能已经写入元数据；此时不要删除它的对象。
+    const current = await findFileRow(ctx.db, input.fileId);
+    if (!current) {
+      await ctx.files.delete(objectKey).catch(() => undefined);
+    }
+    await releaseStorage(ctx, userId, size);
+    throw error;
+  }
+}
+
 export async function toFileView(ctx: AppContext, row: FileRow): Promise<FileView> {
   return {
     id: row.id,
@@ -315,6 +397,7 @@ export async function toFileView(ctx: AppContext, row: FileRow): Promise<FileVie
     created_at_display: formatTime(row.created_at, ctx.tz),
     url_path: `/api/downloadfile?id=${encodeURIComponent(row.id)}`,
     backend: row.storage === 'r2' ? 'r2' : 'd1',
+    encrypted: Number(row.encrypted ?? 1) !== 0,
   };
 }
 
@@ -339,11 +422,12 @@ export async function getFileContent(ctx: AppContext, row: FileRow): Promise<Uin
         '该文件存储在 R2，但当前 Worker 未绑定 FILES。请恢复 r2_buckets 绑定后重试。',
       );
     }
-    const object = await ctx.files.get(r2Key(row.id));
+    const object = await ctx.files.get(fileObjectKey(row));
     if (!object) {
       throw notFound('file_not_found', '文件数据不存在或已被删除');
     }
-    return decryptBytes(ctx.secret, toUint8Array(await object.arrayBuffer()));
+    const bytes = toUint8Array(await object.arrayBuffer());
+    return Number(row.encrypted ?? 1) === 0 ? bytes : decryptBytes(ctx.secret, bytes);
   }
   const result = await ctx.db
     .prepare('SELECT data FROM file_chunks WHERE file_id = ? ORDER BY idx ASC')
@@ -369,7 +453,7 @@ export async function deleteStoredFile(ctx: AppContext, userId: number, fileId: 
         '该文件存储在 R2，但当前 Worker 未绑定 FILES，无法删除 R2 对象。',
       );
     }
-    await ctx.files.delete(r2Key(fileId));
+    await ctx.files.delete(fileObjectKey(row));
   }
   const changes = await runStatement(ctx.db, 'DELETE FROM files WHERE id = ? AND user_id = ?', [fileId, userId]);
   if (changes === 0) {
@@ -417,11 +501,13 @@ export async function deleteR2FilesForUser(ctx: AppContext, userId: number): Pro
   if (!ctx.files) {
     return;
   }
-  const rows = await allRows<{ id: string }>(ctx.db, `SELECT id FROM files WHERE user_id = ? AND storage = 'r2'`, [
-    userId,
-  ]);
+  const rows = await allRows<{ id: string; object_key: string | null }>(
+    ctx.db,
+    `SELECT id, object_key FROM files WHERE user_id = ? AND storage = 'r2'`,
+    [userId],
+  );
   if (rows.length === 0) {
     return;
   }
-  await ctx.files.delete(rows.map((row) => r2Key(row.id)));
+  await ctx.files.delete(rows.map((row) => fileObjectKey(row)));
 }

@@ -1,6 +1,6 @@
 // 此文件由 scripts/gen-schema.mjs 自动生成，请勿手动修改。
 // 来源：migrations/0001_init.sql（修改后运行 pnpm run gen:schema）。
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const SCHEMA_STATEMENTS: readonly string[] = [
   `-- Migration number: 0001 	 init schema
@@ -126,5 +126,13 @@ ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.up
 
 ALTER TABLE files ADD COLUMN storage TEXT NOT NULL DEFAULT 'd1';`,
   `INSERT INTO meta (key, value, updated_at) VALUES ('schema_version', '3', STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;`,
+  `-- Migration number: 0004 	 direct R2 upload
+-- object_key：记录 R2 对象键（历史数据为空时按 files/<id> 推断）。
+-- encrypted：1 = Worker 端 AES-GCM 加密后存储；0 = 浏览器直传，仅依赖 R2 服务端加密。
+
+ALTER TABLE files ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 1;`,
+  `ALTER TABLE files ADD COLUMN object_key TEXT;`,
+  `INSERT INTO meta (key, value, updated_at) VALUES ('schema_version', '4', STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
 ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;`,
 ];

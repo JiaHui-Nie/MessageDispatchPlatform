@@ -19,7 +19,12 @@ export class ShimR2 {
     return {
       key,
       size: bytes.length,
-      body: null,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(bytes.slice());
+          controller.close();
+        },
+      }),
       async arrayBuffer(): Promise<ArrayBuffer> {
         const copy = new Uint8Array(bytes.length);
         copy.set(bytes);

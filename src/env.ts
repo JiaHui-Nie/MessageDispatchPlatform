@@ -21,6 +21,13 @@ export interface Env {
   DEFAULT_STORAGE_QUOTA_MB?: string;
   /** 文件存储后端默认值：auto / d1 / r2，管理后台设置优先。 */
   FILE_STORAGE?: string;
+  /** 大文件直传 R2 所需的 S3 API 配置（Worker Secret）。 */
+  R2_ACCOUNT_ID?: string;
+  R2_BUCKET_NAME?: string;
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  /** 超过该大小（MB）的文件优先使用 R2 预签名直传，默认 20；0 表示全部直传。 */
+  DIRECT_UPLOAD_THRESHOLD_MB?: string;
 }
 
 /** 每个请求的运行时上下文。 */
@@ -36,6 +43,7 @@ export interface AppContext {
   rateLimitDisabled: boolean;
   defaultStorageQuotaBytes: number;
   fileStorage: FileStorageMode;
+  directUploadThresholdBytes: number;
 }
 
 const MIN_SECRET_LENGTH = 16;
@@ -74,7 +82,19 @@ export function createContext(env: Env): AppContext {
     rateLimitDisabled: (env.RATE_LIMIT_DISABLED ?? '').trim() === '1',
     defaultStorageQuotaBytes: parsePositiveInt(env.DEFAULT_STORAGE_QUOTA_MB, 50, 1, 10_240) * 1024 * 1024,
     fileStorage: parseFileStorageMode(env.FILE_STORAGE),
+    directUploadThresholdBytes:
+      parsePositiveInt(env.DIRECT_UPLOAD_THRESHOLD_MB, 20, 0, 10_240) * 1024 * 1024,
   };
+}
+
+/** 是否具备 R2 预签名直传所需的全部配置。 */
+export function hasDirectUploadCredentials(env: Env): boolean {
+  return Boolean(
+    (env.R2_ACCOUNT_ID ?? '').trim() &&
+      (env.R2_BUCKET_NAME ?? '').trim() &&
+      (env.R2_ACCESS_KEY_ID ?? '').trim() &&
+      (env.R2_SECRET_ACCESS_KEY ?? '').trim(),
+  );
 }
 
 export function parseFileStorageMode(raw: string | undefined): FileStorageMode {

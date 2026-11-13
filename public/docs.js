@@ -63,7 +63,7 @@ export function renderDocs(origin) {
        response: `{
   "status": 200,
   "app": "信息分发平台",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "secret_configured": true,
   "database": "ok",
   "schema_version": 3,
@@ -235,7 +235,8 @@ curl -X POST '${base}/api/setinformation?api_key=mdp_xxx' ...
     'files',
     '文件存储',
     `<div class="docs-cards">
-       <div class="docs-card"><h4>加密存储</h4><p>文件先以 AES-256-GCM 加密，再按 900 KB 分块存入 D1；文件名同样加密。</p></div>
+       <div class="docs-card"><h4>加密存储</h4><p>Worker 上传的文件以 AES-256-GCM 加密后按 900 KB 分块存入 D1 或写入 R2；文件名同样加密。</p></div>
+       <div class="docs-card"><h4>大文件直传</h4><p>超过阈值的文件由浏览器直接 PUT 到 R2，不经过 Worker，支持上传进度；单次上限约 4.995 GiB。</p></div>
        <div class="docs-card"><h4>可选 R2</h4><p>默认使用 D1；绑定 R2 后可在管理后台切换后端，新文件使用所选后端，旧文件仍可正常下载。</p></div>
        <div class="docs-card"><h4>配额</h4><p>每个用户有独立空间，默认 50 MB，管理员可以单独调整。</p></div>
        <div class="docs-card"><h4>访问控制</h4><p>每个文件可单独设置“私有”，私有文件必须提供所有者的 API Key 或登录态才能下载。</p></div>
@@ -250,7 +251,7 @@ curl -X POST '${base}/api/setinformation?api_key=mdp_xxx' ...
          ['private', false, '是否需要 API Key 才能下载，默认 <code>false</code>'],
          ['name', false, '覆盖文件名（最多 180 字符）'],
        ],
-       note: '文件大小只受用户剩余存储空间限制；超出配额时返回 <code>413 storage_quota_exceeded</code>。',
+       note: '文件大小只受用户剩余存储空间限制；超过 <code>DIRECT_UPLOAD_THRESHOLD_MB</code> 的文件会走 R2 直传。超出配额时返回 <code>413 storage_quota_exceeded</code>。',
        example: `# multipart
 curl -X POST '${base}/api/uploadfile?api_key=mdp_xxx' \\
   -F 'file=@./report.pdf' \\
@@ -306,8 +307,31 @@ x-api-status: 200
      <h3>网页后台接口</h3>
      ${endpoint({
        path: '/api/files/list',
-       desc: '当前用户的文件列表与配额（需要登录）。',
-       response: `{ "status": 200, "files": [ { "id": "8b1f…", "name": "report.pdf", "size": 20480, "private": true, "backend": "d1", "url_path": "/api/downloadfile?id=8b1f…" } ], "storage": { "quota": 52428800, "used": 20480 }, "storage_backend": "d1", "storage_setting": "auto", "r2_available": false }`,
+       desc: '当前用户的文件列表、配额、当前存储后端与直传状态（需要登录）。',
+       response: `{ "status": 200, "files": [ { "id": "8b1f…", "name": "report.pdf", "size": 20480, "private": true, "backend": "d1", "encrypted": true, "url_path": "/api/downloadfile?id=8b1f…" } ], "storage": { "quota": 52428800, "used": 20480 }, "storage_backend": "d1", "storage_setting": "auto", "r2_available": false, "direct_upload": { "available": false, "threshold": 20971520, "max_size": 5363449856 } }`,
+     })}
+     ${endpoint({
+       path: '/api/files/presign',
+       desc: '大文件直传：生成 R2 预签名 PUT URL（需要登录）。',
+       params: [
+         ['name', true, '文件名，最多 200 字符'],
+         ['size', true, '文件字节数，用于提前检查剩余配额'],
+         ['content_type', false, '默认 <code>application/octet-stream</code>，须与 PUT 一致'],
+         ['private', false, '是否需要 API Key 才能下载'],
+       ],
+       note: '返回的 <code>upload_url</code> 15 分钟内有效；浏览器直接 PUT 到 R2，不经过 Worker。R2 桶需配置 CORS。',
+       response: `{ "status": 200, "file_id": "8b1f…", "upload_url": "https://<bucket>.<account>.r2.cloudflarestorage.com/files/1/8b1f…?X-Amz-…", "method": "PUT", "headers": { "content-type": "application/pdf" }, "expires_in": 900 }`,
+     })}
+     ${endpoint({
+       path: '/api/files/complete',
+       desc: '直传完成后登记文件，Worker 用 HEAD 校验实际大小并占用配额（需要登录）。',
+       params: [
+         ['file_id', true, 'presign 返回的 ID'],
+         ['name', true, '文件名'],
+         ['content_type', false, '与 PUT 时一致'],
+         ['private', false, '是否私有'],
+       ],
+       response: `{ "status": 200, "file_id": "8b1f…", "name": "report.pdf", "size": 20480, "encrypted": false, "backend": "r2", "direct": true, "storage": { "used": 20480 } }`,
      })}
      ${endpoint({
        path: '/api/files/visibility',
@@ -374,8 +398,9 @@ x-api-status: 200
         <tr><td>401</td><td><code>auth_required</code> / <code>invalid_api_key</code></td><td>未登录或 API Key 无效</td></tr>
         <tr><td>403</td><td><code>api_key_required</code></td><td>私有信息/文件需要所有者 API Key</td></tr>
         <tr><td>403</td><td><code>feedback_disabled</code> / <code>admin_required</code></td><td>反馈未开启 / 需要管理员</td></tr>
-        <tr><td>404</td><td><code>not_found</code> / <code>file_not_found</code></td><td>资源不存在</td></tr>
+        <tr><td>404</td><td><code>not_found</code> / <code>file_not_found</code> / <code>upload_not_found</code></td><td>资源不存在</td></tr>
         <tr><td>413</td><td><code>storage_quota_exceeded</code></td><td>剩余存储空间不足</td></tr>
+        <tr><td>503</td><td><code>direct_upload_unavailable</code></td><td>未配置 R2 直传或后端不是 R2</td></tr>
         <tr><td>429</td><td><code>rate_limited</code></td><td>触发限流，响应带 <code>Retry-After</code></td></tr>
       </tbody>
     </table></div>
@@ -383,6 +408,7 @@ x-api-status: 200
     <ul class="docs-list">
       <li>默认存储空间：50 MB/用户（可通过 <code>DEFAULT_STORAGE_QUOTA_MB</code> 或管理后台调整）</li>
       <li>单文件大小：不设独立上限，只受用户剩余存储空间限制</li>
+      <li>R2 直传：单次 PUT 上限约 4.995 GiB；超过 <code>DIRECT_UPLOAD_THRESHOLD_MB</code>（默认 20 MB）的文件自动走直传</li>
       <li>固定信息：最多 500 条/用户，单条 value 最多 100,000 字符</li>
       <li>反馈：单条消息最多 10,000 字符，每个会话最多 500 条消息</li>
       <li>API Key：最多 20 个/用户；注册码：最多 100 次使用</li>

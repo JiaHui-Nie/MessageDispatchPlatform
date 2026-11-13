@@ -40,6 +40,8 @@
     "SESSION_TTL_HOURS": "168",
     "PASSWORD_ITERATIONS": "100000",
     "DEFAULT_STORAGE_QUOTA_MB": "50",
+    // 超过该大小（MB）的文件使用 R2 预签名直传；0 表示全部直传。
+    "DIRECT_UPLOAD_THRESHOLD_MB": "20",
     // 文件存储默认后端：auto（有 R2 绑定则用 R2，否则 D1）/ d1 / r2。
     // 管理后台的「文件存储后端」设置优先于这里的默认值。
     "FILE_STORAGE": "auto"

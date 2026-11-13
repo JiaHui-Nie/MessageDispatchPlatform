@@ -5,6 +5,7 @@ import { createHarness, createUser, ORIGIN, setupAdmin, TestClient, TEST_SECRET 
 import { ShimD1 } from './helpers/d1.ts';
 import { ShimR2 } from './helpers/r2.ts';
 import { handleRequest } from '../src/app.ts';
+import { presignS3Url } from '../src/lib/sigv4.ts';
 import { SCHEMA_STATEMENTS, SCHEMA_VERSION } from '../src/db/schema.generated.ts';
 
 const MB = 1024 * 1024;
@@ -17,6 +18,18 @@ function textFile(content: string | Uint8Array, name = 'hello.txt', type = 'text
 
 function byteFile(size: number, name = 'blob.bin'): FormData {
   return textFile(new Uint8Array(size).fill(97), name, 'application/octet-stream');
+}
+
+function directEnv(r2: ShimR2, overrides: Record<string, unknown> = {}) {
+  return {
+    FILES: r2 as unknown as R2Bucket,
+    R2_ACCOUNT_ID: 'a'.repeat(32),
+    R2_BUCKET_NAME: 'test-bucket',
+    R2_ACCESS_KEY_ID: 'test-access-key',
+    R2_SECRET_ACCESS_KEY: 'test-secret-key',
+    FILE_STORAGE: 'r2',
+    ...overrides,
+  };
 }
 
 const TIME_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$/;
@@ -1090,6 +1103,178 @@ describe('文件存储后端', () => {
   });
 });
 
+describe('R2 预签名直传', () => {
+  it('SigV4 签名与 AWS 官方测试向量一致', async () => {
+    const signed = await presignS3Url({
+      method: 'GET',
+      url: new URL('https://examplebucket.s3.amazonaws.com/test.txt'),
+      accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+      secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      region: 'us-east-1',
+      service: 's3',
+      expiresSeconds: 86400,
+      now: new Date('2013-05-24T00:00:00Z'),
+      payloadHash: null,
+    });
+    assert.equal(
+      new URL(signed).searchParams.get('X-Amz-Signature'),
+      'aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404',
+    );
+  });
+
+  it('生成直传 URL、登记元数据、下载与删除', async () => {
+    const r2 = new ShimR2();
+    const harness = createHarness(directEnv(r2));
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+
+    const list = await alice.client.post<Record<string, any>>('/api/files/list');
+    assert.equal(list.data.direct_upload.available, true);
+    assert.equal(list.data.direct_upload.threshold, 20 * MB);
+    assert.equal(list.data.direct_upload.max_size, Math.floor(4.995 * 1024 * 1024 * 1024));
+
+    const bytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7]);
+    const presign = await alice.client.post<Record<string, any>>('/api/files/presign', {
+      name: 'big.bin',
+      size: bytes.length,
+      content_type: 'application/octet-stream',
+      private: true,
+    });
+    assert.equal(presign.status, 200);
+    assert.equal(presign.data.status, 200);
+    const url = new URL(presign.data.upload_url);
+    assert.equal(url.host, `test-bucket.${'a'.repeat(32)}.r2.cloudflarestorage.com`);
+    assert.equal(url.searchParams.get('X-Amz-Expires'), '900');
+    assert.equal(url.searchParams.get('X-Amz-SignedHeaders'), 'content-type;host');
+    assert.ok(url.searchParams.get('X-Amz-Signature'));
+
+    const objectKey = url.pathname.slice(1);
+    assert.match(objectKey, new RegExp(`^files/\\d+/${presign.data.file_id}$`));
+    r2.objects.set(objectKey, bytes);
+
+    const done = await alice.client.post<Record<string, any>>('/api/files/complete', {
+      file_id: presign.data.file_id,
+      name: 'big.bin',
+      content_type: 'application/octet-stream',
+      private: true,
+    });
+    assert.equal(done.status, 200);
+    assert.equal(done.data.encrypted, false);
+    assert.equal(done.data.backend, 'r2');
+    assert.equal(done.data.size, bytes.length);
+
+    const row = harness.db.raw
+      .prepare('SELECT storage, encrypted, object_key, size FROM files WHERE id = ?')
+      .get(presign.data.file_id) as {
+      storage: string;
+      encrypted: number;
+      object_key: string;
+      size: number;
+    };
+    assert.equal(row.storage, 'r2');
+    assert.equal(Number(row.encrypted), 0);
+    assert.equal(row.object_key, objectKey);
+    assert.equal(Number(row.size), bytes.length);
+    const chunks = harness.db.raw
+      .prepare('SELECT COUNT(*) AS total FROM file_chunks WHERE file_id = ?')
+      .get(presign.data.file_id) as { total: number };
+    assert.equal(Number(chunks.total), 0, '直传文件不应写 D1 分块');
+
+    const anonymous = await new TestClient(harness.env).download(done.data.url_path);
+    assert.equal(anonymous.status, 403);
+    const downloaded = await alice.client.download(done.data.url_path);
+    assert.equal(downloaded.status, 200);
+    assert.equal(downloaded.headers.get('content-length'), String(bytes.length));
+    assert.equal(Buffer.from(await downloaded.arrayBuffer()).toString('hex'), Buffer.from(bytes).toString('hex'));
+
+    const removed = await alice.client.post('/api/files/delete', { id: presign.data.file_id });
+    assert.equal(removed.status, 200);
+    assert.equal(r2.objects.size, 0);
+  });
+
+  it('登记时按实际对象大小占用配额，超额会删除对象', async () => {
+    const r2 = new ShimR2();
+    const harness = createHarness(directEnv(r2));
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+    const users = await harness.client.post<Record<string, any>>('/api/admin/users/list');
+    const aliceRow = users.data.users.find((user: Record<string, unknown>) => user.username === 'alice');
+    await harness.client.post('/api/admin/users/storage', { id: aliceRow.id, quota_mb: 1 });
+
+    const presign = await alice.client.post<Record<string, any>>('/api/files/presign', {
+      name: 'large.bin',
+      size: 500 * 1024,
+      content_type: 'application/octet-stream',
+    });
+    assert.equal(presign.status, 200);
+    const objectKey = new URL(presign.data.upload_url).pathname.slice(1);
+    r2.objects.set(objectKey, new Uint8Array(2 * MB));
+
+    const done = await alice.client.post<Record<string, any>>('/api/files/complete', {
+      file_id: presign.data.file_id,
+      name: 'large.bin',
+      content_type: 'application/octet-stream',
+    });
+    assert.equal(done.status, 413);
+    assert.equal(done.data.error, 'storage_quota_exceeded');
+    assert.equal(r2.objects.size, 0, '超额对象应被删除');
+    const list = await alice.client.post<Record<string, any>>('/api/files/list');
+    assert.equal(list.data.files.length, 0);
+  });
+
+  it('其他用户不能登记不属于自己的直传对象', async () => {
+    const r2 = new ShimR2();
+    const harness = createHarness(directEnv(r2));
+    await setupAdmin(harness);
+    const alice = await createUser(harness, { username: 'alice' });
+    const bob = await createUser(harness, { username: 'bob' });
+
+    const presign = await alice.client.post<Record<string, any>>('/api/files/presign', {
+      name: 'mine.bin',
+      size: 4,
+      content_type: 'application/octet-stream',
+    });
+    const objectKey = new URL(presign.data.upload_url).pathname.slice(1);
+    r2.objects.set(objectKey, new Uint8Array([1, 2, 3, 4]));
+
+    const hijack = await bob.client.post('/api/files/complete', {
+      file_id: presign.data.file_id,
+      name: 'mine.bin',
+      content_type: 'application/octet-stream',
+    });
+    assert.equal(hijack.status, 404);
+    assert.equal(r2.objects.size, 1, '原对象不应被他人取走');
+  });
+
+  it('未配置 S3 凭据或使用 D1 后端时不提供直传', async () => {
+    const r2 = new ShimR2();
+    const withoutCredentials = createHarness({ FILES: r2 as unknown as R2Bucket, FILE_STORAGE: 'r2' });
+    await setupAdmin(withoutCredentials);
+    const alice = await createUser(withoutCredentials, { username: 'alice' });
+    const list = await alice.client.post<Record<string, any>>('/api/files/list');
+    assert.equal(list.data.direct_upload.available, false);
+    const presign = await alice.client.post('/api/files/presign', {
+      name: 'x.bin',
+      size: 4,
+      content_type: 'application/octet-stream',
+    });
+    assert.equal(presign.status, 503);
+    assert.equal(presign.data.error, 'direct_upload_unavailable');
+
+    const d1Harness = createHarness(directEnv(new ShimR2(), { FILE_STORAGE: 'd1' }));
+    await setupAdmin(d1Harness);
+    const d1User = await createUser(d1Harness, { username: 'alice' });
+    const d1List = await d1User.client.post<Record<string, any>>('/api/files/list');
+    assert.equal(d1List.data.direct_upload.available, false);
+    const d1Presign = await d1User.client.post('/api/files/presign', {
+      name: 'x.bin',
+      size: 4,
+      content_type: 'application/octet-stream',
+    });
+    assert.equal(d1Presign.status, 503);
+  });
+});
+
 describe('响应格式', () => {
   it('所有 JSON 接口都带 status，二进制下载带 x-api-status 头', async () => {
     const harness = createHarness();
@@ -1132,7 +1317,7 @@ describe('响应格式', () => {
 
 describe('数据库与接口一致性', () => {
   it('生成的 schema 与迁移 SQL 保持一致', () => {
-    assert.equal(SCHEMA_VERSION, 3);
+    assert.equal(SCHEMA_VERSION, 4);
     const migrationsDir = new URL('../migrations/', import.meta.url);
     const files = readdirSync(migrationsDir)
       .filter((name) => /^\d{4}_.+\.sql$/.test(name))
@@ -1189,13 +1374,15 @@ describe('数据库与接口一致性', () => {
     const versionRow = db.raw.prepare(`SELECT value FROM meta WHERE key = 'schema_version'`).get() as {
       value: string;
     };
-    assert.equal(versionRow.value, '3');
+    assert.equal(versionRow.value, '4');
     const filesTable = db.raw
       .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'files'`)
       .get() as { name?: string } | undefined;
     assert.equal(filesTable?.name, 'files');
     const fileColumns = db.raw.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>;
-    assert.ok(fileColumns.some((column) => column.name === 'storage'), 'files 表应包含 storage 列');
+    for (const name of ['storage', 'encrypted', 'object_key']) {
+      assert.ok(fileColumns.some((column) => column.name === name), `files 表应包含 ${name} 列`);
+    }
     const storage = db.raw
       .prepare('SELECT quota, used FROM user_storage WHERE user_id = 1')
       .get() as { quota: number; used: number } | undefined;
